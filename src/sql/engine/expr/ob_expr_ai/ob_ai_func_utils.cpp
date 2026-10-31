@@ -330,14 +330,22 @@ int ObOllamaUtils::ObOllamaComplete::get_body(common::ObIAllocator &allocator,
     ObJsonObject *body_obj = nullptr;
     ObJsonString *model_str = nullptr;
     ObJsonString *content_str = nullptr;
+    ObJsonBoolean *stream_obj = nullptr;
     if (OB_FAIL(ObAIFuncJsonUtils::get_json_object(allocator, body_obj))) {
     } else if (OB_FAIL(ObAIFuncJsonUtils::get_json_string(allocator, model, model_str))) {
     } else if (OB_FAIL(body_obj->add("model", model_str))) {
     } else if (OB_FAIL(ObAIFuncJsonUtils::get_json_string(allocator, content, content_str))) {
     } else if (OB_FAIL(body_obj->add("prompt", content_str))) {
     } else if (OB_FAIL(ObAIFuncJsonUtils::compact_json_object(allocator, config, body_obj))) {
+    } else if (OB_FAIL(ObAIFuncJsonUtils::get_json_boolean(allocator, false, stream_obj))) {
+    } else if (OB_FAIL(body_obj->add("stream", stream_obj))) {
     } else {
       body = body_obj;
+    }
+    if (OB_SUCC(ret) && OB_NOT_NULL(config) && OB_NOT_NULL(config->get_value("stream"))) {
+      // Ollama 的 /api/generate 默认返回 NDJSON 流的多个 JSON 文档，
+      // 而响应只按单个 JSON 文档解析，因此强制关闭流式返回。
+      LOG_WARN("ai_complete: ollama streaming is not supported, stream is forced to be false");
     }
   }
   return ret;
@@ -1677,6 +1685,33 @@ bool ObAIFuncJsonUtils::ob_is_json_array_valid_prompt_args(ObJsonArray *json_arr
   return is_valid;
 }
 
+// 解析模板中从 start_pos 开始的占位符，返回占位符对应的参数下标，
+// 若该位置不是合法的占位符则返回 -1，end_pos 返回占位符的结束位置。
+static int64_t parse_prompt_placeholder(const char *template_ptr,
+                                         int64_t template_len,
+                                         int64_t start_pos,
+                                         int64_t &end_pos)
+{
+  int64_t index = -1;
+  end_pos = start_pos;
+  bool found_end = false;
+  for (int64_t j = start_pos + 1; j < template_len && !found_end; j++) {
+    if (template_ptr[j] == '}') {
+      end_pos = j;
+      found_end = true;
+    } else if (template_ptr[j] < '0' || template_ptr[j] > '9') {
+      break;
+    }
+  }
+  if (found_end && end_pos > start_pos + 1) {
+    index = 0;
+    for (int64_t k = start_pos + 1; k < end_pos; k++) {
+      index = index * 10 + (template_ptr[k] - '0');
+    }
+  }
+  return index;
+}
+
 int ObAIFuncPromptObjectUtils::replace_all_str_args_in_template(ObIAllocator &allocator, ObJsonObject* prompt_object, ObString& replaced_prompt_str)
 {
   INIT_SUCC(ret);
@@ -1712,49 +1747,53 @@ int ObAIFuncPromptObjectUtils::replace_all_str_args_in_template(ObIAllocator &al
         LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_prompt: unsupported argument type");
       }
       if (OB_SUCC(ret)) {
-        max_result_len += arg_value.length();
         if (OB_FAIL(arg_values.push_back(arg_value))) {
+          ret = OB_ALLOCATE_MEMORY_FAILED;
         }
       }
     }
+
+    // 统计每个占位符在模板中的出现次数。同一个占位符可以出现多次，
+    // 替换时每个出现位置都会拷贝一次参数内容，因此缓冲区必须按出现次数计算。
+    ObArray<int64_t> placeholder_counts;
+    const char *template_ptr = template_str.ptr();
+    int64_t template_len = template_str.length();
+    for (uint64_t i = 0; OB_SUCC(ret) && i < args_count; i++) {
+      if (OB_FAIL(placeholder_counts.push_back(0))) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      }
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < template_len; i++) {
+      if (template_ptr[i] == '{') {
+        int64_t end_pos = i;
+        int64_t index = parse_prompt_placeholder(template_ptr, template_len, i, end_pos);
+        if (index >= 0) {
+          if (static_cast<uint64_t>(index) >= args_count) {
+            ret = OB_INVALID_ARGUMENT;
+            LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_prompt: invalid placeholder index");
+          } else {
+            placeholder_counts.at(index) = placeholder_counts.at(index) + 1;
+            i = end_pos;
+          }
+        }
+      }
+    }
+    for (uint64_t i = 0; OB_SUCC(ret) && i < args_count; i++) {
+      max_result_len += placeholder_counts.at(i) * arg_values.at(i).length();
+    }
+
     if (OB_FAIL(ret)) {
     } else if (OB_ISNULL(result_buf = static_cast<char *>(allocator.alloc(max_result_len)))) {
       ret = OB_ALLOCATE_MEMORY_FAILED;
     } else {
       int64_t result_pos = 0;
-      const char *template_ptr = template_str.ptr();
-      int64_t template_len = template_str.length();
-      
+
       for (int64_t i = 0; i < template_len && OB_SUCC(ret); i++) {
         if (template_ptr[i] == '{') {
-          int64_t start_pos = i;
-          int64_t end_pos = start_pos;
-          bool found_end = false;
-          
-          for (int64_t j = start_pos + 1; j < template_len && !found_end; j++) {
-            if (template_ptr[j] == '}') {
-              end_pos = j;
-              found_end = true;
-            } else if (template_ptr[j] < '0' || template_ptr[j] > '9') {
-              break;
-            }
-          }
-          
-          if (found_end && end_pos > start_pos + 1) {
-            ObString index_str;
-            index_str.assign_ptr(template_ptr + start_pos + 1, static_cast<int32_t>(end_pos - start_pos - 1));
-            
-            int64_t index = 0;
-            bool valid_index = true;
-            for (int64_t k = 0; k < index_str.length() && valid_index; k++) {
-              if (index_str.ptr()[k] >= '0' && index_str.ptr()[k] <= '9') {
-                index = index * 10 + (index_str.ptr()[k] - '0');
-              } else {
-                valid_index = false;
-              }
-            }
-            
-            if (valid_index && index >= 0 && static_cast<uint64_t>(index) < args_count) {
+          int64_t end_pos = i;
+          int64_t index = parse_prompt_placeholder(template_ptr, template_len, i, end_pos);
+          if (index >= 0) {
+            if (static_cast<uint64_t>(index) < args_count) {
               ObString arg_value = arg_values.at(static_cast<uint64_t>(index));
               if (result_pos + arg_value.length() <= max_result_len) {
                 MEMCPY(result_buf + result_pos, arg_value.ptr(), arg_value.length());

@@ -38,7 +38,7 @@ public:
                                 common::ObExprTypeCtx &type_ctx) const override;
   static int eval_ai_embed(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &res);
   static int eval_ai_embed_single_row(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &res);
-  static int eval_ai_embed_in_batch(const ObExpr &expr, ObEvalCtx &ctx);
+  static int eval_ai_embed_in_batch(const ObExpr &expr, ObEvalCtx &ctx, const ObBitVector &skip);
   static int eval_ai_embed_batch(const ObExpr &expr, ObEvalCtx &ctx,
                                  const ObBitVector &skip, const int64_t batch_size);
   static int eval_ai_embed_batch_ex(const ObExpr &expr, ObEvalCtx &ctx,
