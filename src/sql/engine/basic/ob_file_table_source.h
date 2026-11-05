@@ -225,6 +225,10 @@ private:
   ObString file_path_;
   int64_t file_size_;
   int64_t file_mtime_;
+  // the terminated copy of the path of the file, the file system needs a
+  // terminated name
+  char *path_copy_;
+  ObString file_name_;
 };
 
 /**

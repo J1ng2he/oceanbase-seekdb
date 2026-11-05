@@ -3496,10 +3496,13 @@ int ObDMLResolver::resolve_str_const(const ParseNode &parse_tree, ObString& path
                                              enable_mysql_compatible_dates,
                                              session_info->get_min_const_integer_precision(),
                                              nullptr != params_.secondary_namespace_))) {
-  } else if (OB_ISNULL(buf = static_cast<char*>(allocator_->alloc(val.get_string().length())))) { // deep copy str value
+  } else if (OB_ISNULL(buf = static_cast<char*>(allocator_->alloc(val.get_string().length() + 1)))) { // deep copy str value
     ret = common::OB_ALLOCATE_MEMORY_FAILED;
   } else {
     MEMCPY(buf, val.get_string().ptr(), val.get_string().length());
+    // the copy is terminated, the file system and the realpath() of the secure
+    // path check need a terminated name
+    buf[val.get_string().length()] = '\0';
     path_str.assign_ptr(buf, val.get_string().length());
   }
   return ret;

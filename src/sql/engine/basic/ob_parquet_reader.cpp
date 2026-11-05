@@ -20,6 +20,9 @@
 #include "share/ob_errno.h"
 #include "lib/compress/zlib/ob_zlib_compressor.h"
 
+#include <string.h>
+#include <string>
+
 namespace oceanbase
 {
 namespace sql
@@ -605,6 +608,13 @@ void ObParquetReader::close()
   page_alloc_.reset();
 }
 
+// the path of a file is a slice of the path of the statement, it is not
+// terminated, the file system needs a terminated name
+static std::string terminated_path(const ObString &path)
+{
+  return std::string(path.ptr(), path.length());
+}
+
 int ObParquetReader::open(ObIAllocator &allocator, const ObString &path)
 {
   int ret = OB_SUCCESS;
@@ -615,11 +625,10 @@ int ObParquetReader::open(ObIAllocator &allocator, const ObString &path)
   file_size_ = 0;
   if (path.empty()) {
     ret = OB_ERR_UNEXPECTED;
-  } else if (OB_ISNULL(fp_ = fopen(path.ptr(), "rb"))) {
+  } else if (OB_ISNULL(fp_ = fopen(terminated_path(path).c_str(), "rb"))) {
     ret = OB_FILE_NOT_EXIST;
     LOG_WARN("cannot open the parquet file", K(ret), K(path));
-  } else if (OB_FAIL(ret = fseek(fp_, 0, SEEK_END))) {
-  } else {
+  } else if (OB_FAIL(ret = fseek(fp_, 0, SEEK_END))) {  } else {
     const long size = ftell(fp_);
     if (size < 12) {
       ret = OB_ERR_UNEXPECTED;

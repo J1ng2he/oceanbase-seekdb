@@ -517,7 +517,9 @@ ObFileTableReader::ObFileTableReader()
       parquet_row_(-1),
       describe_values_(common::ObArray<ObString>()),
       describe_row_count_(0),
-      describe_pos_(0)
+      describe_pos_(0),
+      path_copy_(NULL),
+      file_name_()
 {
 }
 
@@ -546,6 +548,8 @@ void ObFileTableReader::close()
   file_path_ = ObString();
   file_size_ = 0;
   file_mtime_ = 0;
+  path_copy_ = NULL;
+  file_name_ = ObString();
 }
 
 int ObFileTableReader::open(ObIAllocator &allocator,
@@ -567,35 +571,43 @@ int ObFileTableReader::open(ObIAllocator &allocator,
   parquet_row_ = -1;
   if (OB_UNLIKELY(path.empty())) {
     ret = OB_ERR_UNEXPECTED;
-  } else if (options_.describe_) {
+  } else if (OB_UNLIKELY(OB_ISNULL(path_copy_ = static_cast<char *>(allocator.alloc(path.length() + 1))))) {
+    // the path is copied, the file system needs a terminated name
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+  } else {
+    memcpy(path_copy_, path.ptr(), path.length());
+    path_copy_[path.length()] = '\0';
+    file_name_ = ObString(path.length(), path_copy_);
+  }
+  if (OB_SUCC(ret) && OB_UNLIKELY(options_.describe_)) {
     // the rows of the table are the description of the columns of the file
-    if (OB_FAIL(ret = build_describe_rows(allocator, path, options_))) {
+    if (OB_FAIL(ret = build_describe_rows(allocator, file_name_, options_))) {
       LOG_WARN("cannot describe the file", K(ret), K(path));
     } else {
       column_count_ = ObFileTableSource::DESCRIBE_COLUMN_COUNT;
     }
   } else if (OB_FILE_FUNC_GLOB == options_.func_type_) {
     // a glob pattern does not open a single file, it expands to a list of files
-    if (OB_FAIL(ret = ObFileTableSource::list_glob_files(allocator, path, glob_files_))) {
-      LOG_WARN("cannot expand the glob pattern", K(ret), K(path));
+    if (OB_FAIL(ret = ObFileTableSource::list_glob_files(allocator, file_name_, glob_files_))) {
+      LOG_WARN("cannot expand the glob pattern", K(ret), K(file_name_));
     } else {
       column_count_ = 1;
     }
   } else if (OB_FILE_FUNC_READ_PARQUET == options_.func_type_) {
     // the schema of a parquet file is part of the file itself
-    if (OB_FAIL(ret = parquet_reader_.open(allocator, path))) {
-      LOG_WARN("cannot open the parquet file", K(ret), K(path));
+    if (OB_FAIL(ret = parquet_reader_.open(allocator, file_name_))) {
+      LOG_WARN("cannot open the parquet file", K(ret), K(file_name_));
     } else {
       column_count_ = parquet_reader_.get_column_count();
     }
-  } else if (OB_ISNULL(fp_ = fopen(path.ptr(), "rb"))) {
+  } else if (OB_ISNULL(fp_ = fopen(file_name_.ptr(), "rb"))) {
     ret = OB_FILE_NOT_EXIST;
-    LOG_WARN("cannot open the file", K(ret), K(path));
+    LOG_WARN("cannot open the file", K(ret), K(file_name_));
   } else if (OB_ISNULL(buf_) && OB_ISNULL(buf_ = static_cast<char *>(allocator.alloc(FILE_TABLE_READ_BUF_SIZE)))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
-  } else if (OB_FAIL(ret = record_file_stamp(allocator, path))) {
+  } else if (OB_FAIL(ret = record_file_stamp(allocator, file_name_))) {
     // the stamp of the file is needed to detect a file that changes
-    LOG_WARN("cannot remember the state of the file", K(ret), K(path));
+    LOG_WARN("cannot remember the state of the file", K(ret), K(file_name_));
   } else {
     buf_size_ = FILE_TABLE_READ_BUF_SIZE;
     buf_pos_ = 0;
@@ -1561,7 +1573,10 @@ int ObFileTableSource::list_glob_files(ObIAllocator &allocator,
     FindClose(handle);
   }
 #else
-  DIR *handle = opendir(dir.ptr());
+  // the directory part of the pattern is a slice of the path of the statement,
+  // it is not terminated, the directory has to be copied
+  const std::string dir_name(dir.ptr(), dir.length());
+  DIR *handle = opendir(dir_name.c_str());
   if (NULL == handle) {
     ret = OB_FILE_NOT_EXIST;
     LOG_WARN("cannot list the directory", K(ret), K(dir));
