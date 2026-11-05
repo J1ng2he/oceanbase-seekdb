@@ -3721,22 +3721,35 @@ static int check_file_table_secure_path(ObIAllocator &allocator,
       check_path = ObString(sep_pos, path.ptr());
     }
   }
-  const char *full_path = nullptr;
-#ifdef _WIN32
-  if (OB_ISNULL(full_path = ::_fullpath(full_path_buf, check_path.ptr(), FILE_TABLE_PATH_BUF_SIZE))) {
-#else
-  if (OB_ISNULL(full_path = ::realpath(check_path.ptr(), full_path_buf))) {
-#endif
-    ret = OB_FILE_NOT_EXIST;
-    LOG_WARN("cannot resolve the path of the file", K(ret), K(check_path));
+  // the path is a slice of the text of the statement, it is not terminated.
+  // realpath and _fullpath read the string until its end, so the part of the
+  // pattern that follows the directory would be read as a part of the path
+  // and the directory would never be found.  The path that is checked has to
+  // be copied into a terminated buffer.
+  char *path_copy = static_cast<char *>(allocator.alloc(check_path.length() + 1));
+  if (OB_ISNULL(path_copy)) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
   } else {
-    ObString secure_file_priv;
-    if (OB_FAIL(ObSchemaUtils::get_runtime_varchar_variable(*GCTX.schema_service_,
-                                                             SYS_VAR_SECURE_FILE_PRIV,
-                                                             allocator,
-                                                             secure_file_priv))) {
-    } else if (OB_FAIL(ObResolverUtils::check_secure_path(secure_file_priv, ObString(full_path)))) {
-      LOG_WARN("the file is not allowed by secure_file_priv", K(ret), K(check_path));
+    memcpy(path_copy, check_path.ptr(), static_cast<size_t>(check_path.length()));
+    path_copy[check_path.length()] = '\0';
+    check_path.assign_ptr(path_copy, check_path.length());
+    const char *full_path = nullptr;
+#ifdef _WIN32
+    if (OB_ISNULL(full_path = ::_fullpath(full_path_buf, check_path.ptr(), FILE_TABLE_PATH_BUF_SIZE))) {
+#else
+    if (OB_ISNULL(full_path = ::realpath(check_path.ptr(), full_path_buf))) {
+#endif
+      ret = OB_FILE_NOT_EXIST;
+      LOG_WARN("cannot resolve the path of the file", K(ret), K(check_path));
+    } else {
+      ObString secure_file_priv;
+      if (OB_FAIL(ObSchemaUtils::get_runtime_varchar_variable(*GCTX.schema_service_,
+                                                               SYS_VAR_SECURE_FILE_PRIV,
+                                                               allocator,
+                                                               secure_file_priv))) {
+      } else if (OB_FAIL(ObResolverUtils::check_secure_path(secure_file_priv, ObString(full_path)))) {
+        LOG_WARN("the file is not allowed by secure_file_priv", K(ret), K(check_path));
+      }
     }
   }
   return ret;
