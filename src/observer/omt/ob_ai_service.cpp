@@ -510,6 +510,9 @@ int ObAiColumnWorker::handle_group(sqlclient::ObISQLConnection &conn,
   } else {
     // the group failed, the tasks are either tried again later or removed
     const bool terminal = (!retryable || first.retry_count_ + 1 > max_retries);
+    LOG_WARN("[AI_COLUMN_WORKER] the task group failed",
+             K(ret), K(retryable), K(max_retries), K(first.retry_count_),
+             K(table_id), K(begin), K(end), K(request_id));
     int tmp_ret = handle_group_failure(conn, table_schema, database_schema, ai_columns,
                                        state_columns, request_columns, tasks, begin, end,
                                        request_id, max_retries, terminal);
