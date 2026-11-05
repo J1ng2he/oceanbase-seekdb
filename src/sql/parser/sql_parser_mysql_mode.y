@@ -6301,6 +6301,7 @@ ai_column_option
 ai_column_option:
 relation_name COMP_EQ expr
 {
+  UNUSED($1);
   ParseNode *name_node = NULL;
   ParseNode *value_node = NULL;
   malloc_terminal_node(name_node, result->malloc_pool_, T_VARCHAR);
