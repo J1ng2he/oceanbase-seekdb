@@ -1,0 +1,3 @@
+# the runtime state of the gateway and of the mock
+state/
+ai_column_mock_state/
