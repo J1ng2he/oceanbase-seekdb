@@ -308,6 +308,8 @@ private:
                        const IndexDMLInfo &dml_info,
                        ObDMLBaseCtDef &dml_ctdef,
                        uint64_t dml_event);
+  int check_ai_columns(const IndexDMLInfo &index_dml_info,
+                       ObDMLBaseCtDef &dml_base_ctdef);
   int add_all_column_infos(ObLogDelUpd &op,
                            const common::ObIArray<ObColumnRefRawExpr*> &columns,
                            bool is_heap_table,

@@ -553,12 +553,30 @@ int ObExternalFileFormat::to_string(char *buf, const int64_t buf_len, int64_t &p
     case CSV_FORMAT:
       OZ(csv_format_.to_json_kv_string(buf, buf_len, pos, into_outfile));
       OZ(origin_file_format_str_.to_json_kv_string(buf, buf_len, pos));
+      OZ(to_json_kv_string(buf, buf_len, pos));
       break;
     default:
       // do nothing, format type can be invalid
       break;
   }
   OZ(J_OBJ_END());
+  return ret;
+}
+
+// the options that are only used when the rows of a statement are written into
+// a file, they are the options of the copy statement
+int ObExternalFileFormat::to_json_kv_string(char *buf, const int64_t buf_len, int64_t &pos) const
+{
+  int ret = OB_SUCCESS;
+  ObCStringHelper helper;
+  OZ(J_COMMA());
+  OZ(databuff_printf(buf, buf_len, pos, R"("FILE_HEADER":%s)", STR_BOOL(file_header_)));
+  OZ(J_COMMA());
+  OZ(databuff_printf(buf, buf_len, pos, R"("NULL_STR":"%s")",
+                     helper.convert(ObHexStringWrap(null_str_))));
+  OZ(J_COMMA());
+  OZ(databuff_printf(buf, buf_len, pos, R"("HEADER_NAMES":"%s")",
+                     helper.convert(ObHexStringWrap(header_names_))));
   return ret;
 }
 
@@ -599,11 +617,46 @@ int ObExternalFileFormat::load_from_string(const ObString &str, ObIAllocator &al
         case CSV_FORMAT:
           OZ (csv_format_.load_from_json_data(format_type_node, allocator));
           OZ (origin_file_format_str_.load_from_json_data(format_type_node, allocator));
+          OZ (load_copy_options_from_json_data(format_type_node, allocator));
           break;
         default:
           ret = OB_ERR_UNEXPECTED;
           break;
       }
+    }
+  }
+  return ret;
+}
+
+// the options that are only used when the rows of a statement are written into
+// a file, they are the options of the copy statement
+int ObExternalFileFormat::load_copy_options_from_json_data(json::Pair *&node, ObIAllocator &allocator)
+{
+  int ret = OB_SUCCESS;
+  while (OB_SUCC(ret) && OB_NOT_NULL(node)) {
+    if (0 == node->name_.case_compare("FILE_HEADER")
+        && (json::JT_TRUE == node->value_->get_type()
+            || json::JT_FALSE == node->value_->get_type())) {
+      file_header_ = (json::JT_TRUE == node->value_->get_type());
+      node = node->get_next();
+    } else if (0 == node->name_.case_compare("NULL_STR")
+               && json::JT_STRING == node->value_->get_type()) {
+      ObObj obj;
+      OZ(ObHexUtilsBase::unhex(node->value_->get_string(), allocator, obj));
+      if (OB_SUCC(ret) && !obj.is_null()) {
+        null_str_ = obj.get_string();
+      }
+      node = node->get_next();
+    } else if (0 == node->name_.case_compare("HEADER_NAMES")
+               && json::JT_STRING == node->value_->get_type()) {
+      ObObj obj;
+      OZ(ObHexUtilsBase::unhex(node->value_->get_string(), allocator, obj));
+      if (OB_SUCC(ret) && !obj.is_null()) {
+        header_names_ = obj.get_string();
+      }
+      node = node->get_next();
+    } else {
+      break;
     }
   }
   return ret;

@@ -963,10 +963,12 @@ struct ObExternalFileFormat
     OPT_BINARY_AS_TEXT = 1 << 1,
   };
 
-  ObExternalFileFormat() : format_type_(INVALID_FORMAT) {}
+  ObExternalFileFormat() : format_type_(INVALID_FORMAT), file_header_(false), null_str_(), header_names_() {}
   int to_string_with_alloc(common::ObString &str, common::ObIAllocator &allocator, bool into_outfile = false) const;
   int to_string(char* buf, const int64_t buf_len, int64_t &pos, bool into_outfile = false) const;
   int64_t to_string(char* buf, const int64_t buf_len, bool into_outfile = false) const;
+  int to_json_kv_string(char* buf, const int64_t buf_len, int64_t &pos) const;
+  int load_copy_options_from_json_data(json::Pair *&node, common::ObIAllocator &allocator);
   int load_from_string(const common::ObString &str, common::ObIAllocator &allocator);
   int mock_gen_column_def(const share::schema::ObColumnSchemaV2 &column, common::ObIAllocator &allocator, common::ObString &def);
   int get_format_file_extension(FormatType format_type, ObString &file_extension);
@@ -975,6 +977,18 @@ struct ObExternalFileFormat
   FormatType format_type_;
   sql::ObCSVGeneralFormat csv_format_;
   uint64_t options_;
+  // whether the file holds a row with the names of the columns, the row is
+  // written when the rows of the statement are written into the file
+  bool file_header_;
+  // the text that is written for a null value, an empty text means that the
+  // default of the format is used
+  common::ObString null_str_;
+  // the names of the columns of the header row, the names are separated by
+  // the character COPY_HEADER_NAME_SEPARATOR
+  common::ObString header_names_;
+  // the names of the columns of the header row are separated by this
+  // character, it never shows up in the name of a column
+  static constexpr const char HEADER_NAME_SEPARATOR = '\x01';
   static const char *FORMAT_TYPE_STR[];
 };
 

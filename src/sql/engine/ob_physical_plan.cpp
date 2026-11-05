@@ -68,6 +68,7 @@ ObPhysicalPlan::ObPhysicalPlan(MemoryContext &mem_context /* = CURRENT_CONTEXT *
     session_id_(0),
     table_locations_(allocator_),
     das_table_locations_(allocator_),
+    ai_column_refs_(allocator_, 64),
     row_param_map_(allocator_),
     is_update_uniq_index_(false),
     contain_index_location_(false),
@@ -164,6 +165,7 @@ void ObPhysicalPlan::reset()
   base_constraints_.reset();
   strict_constrinats_.reset();
   non_strict_constrinats_.reset();
+  ai_column_refs_.reset();
   contain_paramed_column_field_ = false;
   need_consistent_snapshot_ = true;
   is_batched_multi_stmt_ = false;
@@ -1205,6 +1207,24 @@ bool ObPhysicalPlan::try_record_plan_info()
   bool expected = true;
   bool b_ret = can_set_feedback_info_.compare_exchange_strong(expected, false);
   return b_ret;
+}
+
+int ObPhysicalPlan::add_ai_column_ref(uint64_t table_id, uint64_t column_id)
+{
+  int ret = OB_SUCCESS;
+  bool exist = false;
+  for (int64_t i = 0; OB_SUCC(ret) && !exist && i < ai_column_refs_.count(); ++i) {
+    exist = ai_column_refs_.at(i).table_id_ == table_id
+            && ai_column_refs_.at(i).column_id_ == column_id;
+  }
+  if (OB_SUCC(ret) && !exist) {
+    const ObAiColumnRef ref(table_id, column_id);
+    if (OB_FAIL(ai_column_refs_.push_back(ref))) {
+      SQL_ENG_LOG(WARN, "failed to add the reference of an AI column",
+                  K(ret), K(table_id), K(column_id));
+    }
+  }
+  return ret;
 }
 
 } //namespace sql

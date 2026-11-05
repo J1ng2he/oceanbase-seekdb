@@ -1302,6 +1302,31 @@ int ObSchemaServiceSQLImpl::get_sys_variable_schema(
       ObSysVarClassType sys_var_id = ObSysVariables::get_sys_var_id(i);
       const ObSysVarSchema *sys_var = NULL;
       if (OB_FAIL(sys_variable_schema.get_sysvar_schema(sys_var_id, sys_var))) {
+        if (OB_ERR_SYS_VARIABLE_UNKNOWN != ret) {
+          // a real error, do not try to mock the schema
+        } else {
+          // The variable is not stored in __all_sys_variable, which means it
+          // was added by a binary that is newer than the one that created the
+          // table.  Mock its schema with the compiled-in default value so
+          // that the observer is still able to start up.
+          ret = OB_SUCCESS;
+          ObSysVarSchema mock_sysvar;
+          if (OB_FAIL(mock_sysvar.set_name(ObSysVariables::get_name(i)))
+              || OB_FAIL(mock_sysvar.set_value(ObSysVariables::get_value(i)))
+              || OB_FAIL(mock_sysvar.set_min_val(ObSysVariables::get_min(i)))
+              || OB_FAIL(mock_sysvar.set_max_val(ObSysVariables::get_max(i)))
+              || OB_FAIL(mock_sysvar.set_info(ObSysVariables::get_info(i)))) {
+            ret = OB_ERR_UNEXPECTED;
+          } else {
+            mock_sysvar.set_data_type(ObSysVariables::get_type(i));
+            mock_sysvar.set_flags(ObSysVariables::get_flags(i));
+            mock_sysvar.set_schema_version(fetch_version);
+            if (OB_FAIL(ret = sys_variable_schema.add_sysvar_schema(mock_sysvar))) {
+              LOG_WARN("failed to mock the schema of the system variable",
+                       K(ret), "name", ObSysVariables::get_name(i));
+            }
+          }
+        }
       } else if (OB_ISNULL(sys_var)) {
         ret = OB_ERR_UNEXPECTED;
       } else {

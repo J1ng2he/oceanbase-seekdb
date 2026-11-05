@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX SQL_RESV
 #include "sql/resolver/ddl/ob_explain_resolver.h"
+#include "sql/resolver/dml/ob_select_resolver.h"
 #include "sql/resolver/ob_resolver.h"
 
 using namespace oceanbase;
@@ -143,5 +144,71 @@ int ObExplainResolver::resolve(const ParseNode &parse_tree)
     }
   }
 
+  return ret;
+}
+
+// ---------------------------------------------------------------------------
+// ObDescribeResolver
+// ---------------------------------------------------------------------------
+
+// looks for a file table function in the parse tree of a statement
+bool ObDescribeResolver::has_file_table_func(const ParseNode &node)
+{
+  bool found = false;
+  if (T_FILE_TABLE_FUNC == node.type_) {
+    found = true;
+  } else {
+    for (int32_t i = 0; !found && i < node.num_child_; ++i) {
+      const ParseNode *child = node.children_[i];
+      if (OB_NOT_NULL(child)) {
+        found = has_file_table_func(*child);
+      }
+    }
+  }
+  return found;
+}
+
+// a describe of a statement that does not read a file shows the plan of the
+// statement, it is the behaviour of MySQL
+int ObDescribeResolver::resolve_as_explain(const ParseNode &child_node)
+{
+  int ret = OB_SUCCESS;
+  ObExplainStmt *explain_stmt = NULL;
+  ObStmt *child_stmt = NULL;
+  if (OB_ISNULL(explain_stmt = create_stmt<ObExplainStmt>())) {
+    ret = OB_SQL_RESOLVER_NO_MEMORY;
+    LOG_WARN("failed to create explain stmt");
+  } else {
+    ObResolver resolver(params_);
+    if (OB_FAIL(ret = resolver.resolve(ObResolver::IS_NOT_PREPARED_STMT, child_node, child_stmt))) {
+    } else if (OB_ISNULL(child_stmt) || !child_stmt->is_dml_stmt()) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("failed to generate stmt for child stmt");
+    } else {
+      explain_stmt->set_explain_query_stmt(static_cast<ObDMLStmt *>(child_stmt));
+      ObExplainDisplayOpt opt;
+      opt.with_tree_line_ = true;
+      explain_stmt->set_display_opt(opt);
+    }
+  }
+  return ret;
+}
+
+int ObDescribeResolver::resolve(const ParseNode &parse_tree)
+{
+  int ret = OB_SUCCESS;
+  if (T_DESCRIBE_STMT != parse_tree.type_ || 1 != parse_tree.num_child_
+      || OB_ISNULL(parse_tree.children_[0])) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("invalid DESCRIBE syntax",
+             "type", parse_tree.type_,
+             "# of child", parse_tree.num_child_);
+  } else if (!has_file_table_func(*parse_tree.children_[0])) {
+    ret = resolve_as_explain(*parse_tree.children_[0]);
+  } else {
+    // the table of the statement describes the columns of the file
+    set_describe_file_table(true);
+    ret = ObSelectResolver::resolve(*parse_tree.children_[0]);
+  }
   return ret;
 }

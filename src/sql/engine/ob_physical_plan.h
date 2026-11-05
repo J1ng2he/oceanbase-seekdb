@@ -20,6 +20,7 @@
 #include "lib/allocator/page_arena.h"
 #include "lib/list/ob_dlist.h"
 #include "lib/utility/ob_mod_define.h"
+#include "lib/utility/ob_print_utils.h"
 #include "common/ob_field.h"
 #include "sql/ob_sql_context.h"
 #include "sql/engine/ob_physical_plan_ctx.h"
@@ -56,6 +57,18 @@ class ObSqlSchemaGuard;
 typedef common::ObFixedArray<common::ObFixedArray<int64_t, common::ObIAllocator>, common::ObIAllocator> PhyRowParamMap;
 typedef common::ObFixedArray<ObTableLocation, common::ObIAllocator> TableLocationFixedArray;
 typedef common::ObFixedArray<ObPlanPwjConstraint, common::ObIAllocator> PlanPwjConstraintArray;
+
+// The reference to an AI column of a table, it is used by the strict read of
+// the AI columns.
+struct ObAiColumnRef
+{
+  ObAiColumnRef() : table_id_(OB_INVALID_ID), column_id_(OB_INVALID_ID) {}
+  ObAiColumnRef(uint64_t table_id, uint64_t column_id) : table_id_(table_id), column_id_(column_id) {}
+  TO_STRING_KV(K_(table_id), K_(column_id));
+  uint64_t table_id_;
+  uint64_t column_id_;
+};
+typedef common::ObFixedArray<ObAiColumnRef, common::ObIAllocator> AiColumnRefArray;
 
 class ObPhysicalPlan : public ObPlanCacheObject
 {
@@ -224,6 +237,12 @@ public:
   bool contain_table_scan() const { return contain_table_scan_; }
   void set_has_nested_sql(bool has_nested_sql) { has_nested_sql_ = has_nested_sql; }
   bool has_nested_sql() const { return has_nested_sql_; }
+  // The AI columns that the statement refers to.  They are checked while the
+  // statement is executed, when the strict read of the AI columns is on.
+  int add_ai_column_ref(uint64_t table_id, uint64_t column_id);
+  int get_ai_column_ref_count() const { return ai_column_refs_.count(); }
+  const common::ObFixedArray<ObAiColumnRef, common::ObIAllocator> &get_ai_column_refs() const
+  { return ai_column_refs_; }
   void set_session_id(uint64_t v) { session_id_ = v; }
   uint64_t get_session_id() const { return session_id_; }
   bool contains_temp_table() const {return 0 != session_id_; }
@@ -452,6 +471,11 @@ private:
   //for plan cache, not need serialize
   TableLocationFixedArray table_locations_; // ordinary table's table location, participate in plan cache plan selection
   TableLocationFixedArray das_table_locations_; // DAS table's table location, used for calculating DAS partition information
+  // The AI columns that the statement refers to.  They are checked while the
+  // statement is executed, when the strict read of the AI columns is on.  The
+  // member is not serialized, the plan is not cloned, the plan cache object is
+  // the plan itself.
+  AiColumnRefArray ai_column_refs_;
 
   PhyRowParamMap row_param_map_;
   bool is_update_uniq_index_;

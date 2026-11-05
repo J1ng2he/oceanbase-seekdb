@@ -200,6 +200,12 @@ int ObSelectIntoOp::inner_get_next_row()
       && T_INTO_VARIABLES != into_type
       && OB_FAIL(create_the_only_data_writer(data_writer))) {
   }
+  if (OB_SUCC(ret) && T_INTO_OUTFILE == into_type && !header_written_) {
+    // the row that holds the names of the columns is written before the rows
+    // of the statement
+    if (OB_FAIL(write_header(data_writer))) {
+    }
+  }
   while (OB_SUCC(ret) && row_count < top_limit_cnt_) {
     clear_evaluated_flag();
     if (OB_FAIL(child_->get_next_row())) {
@@ -253,6 +259,12 @@ int ObSelectIntoOp::inner_get_next_batch(const int64_t max_row_cnt)
     if (OB_FAIL(create_the_only_data_writer(data_writer))) {
     } else if (OB_ISNULL(data_writer)) {
       ret = OB_ERR_UNEXPECTED;
+    }
+  }
+  if (OB_SUCC(ret) && T_INTO_OUTFILE == into_type && !header_written_) {
+    // the row that holds the names of the columns is written before the rows
+    // of the statement
+    if (OB_FAIL(write_header(data_writer))) {
     }
   }
 
@@ -932,13 +944,60 @@ int ObSelectIntoOp::print_field(const ObObj &obj, ObCsvFileWriter &data_writer)
   if (!has_escape_) {
     OZ(write_obj_to_file(obj, data_writer, false));
   } else if (obj.is_null()) {
-    OZ(write_single_char_to_file(&char_escape_, data_writer));
-    OZ(write_single_char_to_file(&char_n, data_writer));
+    if (!external_properties_.null_str_.empty()) {
+      // the copy statement writes the text of the null value instead of the
+      // default of the format
+      ObObj null_obj;
+      null_obj.set_string(ObVarcharType, external_properties_.null_str_);
+      null_obj.set_collation_type(cs_type_);
+      OZ(write_obj_to_file(null_obj, data_writer, false));
+    } else {
+      OZ(write_single_char_to_file(&char_escape_, data_writer));
+      OZ(write_single_char_to_file(&char_n, data_writer));
+    }
   } else {
     OZ(write_obj_to_file(obj, data_writer, true));
   }
   if (need_enclose) {
     OZ(write_single_char_to_file(&char_enclose_, data_writer));
+  }
+  return ret;
+}
+
+// writes the row that holds the names of the columns, the row is written
+// before the first row of the statement
+int ObSelectIntoOp::write_header(ObExternalFileWriter *data_writer)
+{
+  int ret = OB_SUCCESS;
+  ObCsvFileWriter *csv_data_writer = nullptr;
+  const ObString &names = external_properties_.header_names_;
+  header_written_ = true;
+  if (!external_properties_.file_header_ || names.empty()) {
+    return ret;
+  }
+  if (OB_ISNULL(csv_data_writer = static_cast<ObCsvFileWriter *>(data_writer))) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    int64_t start = 0;
+    bool is_first_name = true;
+    for (int64_t i = 0; OB_SUCC(ret) && i <= names.length(); ++i) {
+      if (i == names.length()
+          || ObExternalFileFormat::HEADER_NAME_SEPARATOR == names.ptr()[i]) {
+        if (!is_first_name && OB_FAIL(ret = write_obj_to_file(field_str_, *csv_data_writer))) {
+          break;
+        }
+        is_first_name = false;
+        ObObj name_obj;
+        name_obj.set_string(ObVarcharType, names.ptr() + start, i - start);
+        name_obj.set_collation_type(cs_type_);
+        if (OB_FAIL(ret = write_obj_to_file(name_obj, *csv_data_writer, true))) {
+          break;
+        }
+        start = i + 1;
+      }
+    }
+    if (OB_SUCC(ret) && OB_FAIL(ret = write_obj_to_file(line_str_, *csv_data_writer))) {
+    }
   }
   return ret;
 }

@@ -106,6 +106,58 @@ struct ObDefaultValueRes
   common::ObObjParam &value_;
 };
 
+/**
+ * The parsed specification of one AI column.
+ *
+ * The specification is built from the AI COLUMN attribute, for example
+ *   tags json AI COLUMN (AI_COMPLETE('m', concat('Classify: ', content)))
+ *     WITH (sync_mode='async', max_retries=2)
+ *
+ * It is serialized into a flat text form and persisted in the comment of the
+ * hidden "result spec" column, so that both the SQL layer (through the
+ * oceanbase.__all_ai_column system view) and the C++ layer can read it back.
+ */
+struct ObAiColumnSpec
+{
+  enum AiFuncType
+  {
+    AI_FUNC_UNKNOWN = 0,
+    AI_FUNC_COMPLETE,
+    AI_FUNC_EMBED
+  };
+  enum HiddenKind
+  {
+    AI_HIDDEN_KIND_STATE = 0,
+    AI_HIDDEN_KIND_REQUEST = 1,
+    AI_HIDDEN_KIND_SPEC = 2
+  };
+  ObAiColumnSpec()
+    : func_type_(AI_FUNC_UNKNOWN), max_retries_(0), dim_(-1) {}
+  AiFuncType func_type_;
+  common::ObString func_name_;
+  common::ObString model_name_;
+  int64_t max_retries_;
+  int64_t dim_;
+  common::ObString sync_mode_;
+  common::ObString prompt_expr_;
+  common::ObString normalized_expr_;
+  common::ObString deps_;
+  common::ObString spec_text_;
+};
+
+/**
+ * One AI column of the table being resolved. It is collected while the column
+ * attributes are resolved and consumed later, when the hidden companion
+ * columns are created.
+ */
+struct ObAiColumnInfo
+{
+  common::ObString column_name_;
+  common::ObString spec_text_;
+  // The user columns the prompt expression depends on.
+  common::ObSEArray<common::ObString, 8> deps_;
+};
+
 class ObDDLResolver : public ObStmtResolver
 {
 public:
@@ -452,6 +504,18 @@ public:
       const ObString &part_func_expr_str,
       ObIAllocator &allocator,
       ObIArray<ObString> &partkey_strs);
+  /**
+   * Collects the columns the expression of an AI column depends on.
+   *
+   * The names inside the string literals and the names of the functions are not
+   * column references, only the last part of a qualified name can be a column
+   * name.
+   *
+   * @param prompt_expr  the expression of the prompt of the AI column
+   * @param deps         the columns the expression depends on
+   */
+  static int collect_ai_column_deps(const common::ObString &prompt_expr,
+                                     common::ObIArray<common::ObString> &deps);
 protected:
   static int append_vec_hnsw_args(
       const ObPartitionResolveResult &resolve_result,
@@ -545,6 +609,35 @@ protected:
   int resolve_generated_column_attribute(share::schema::ObColumnSchemaV2 &column,
                                          ParseNode *attrs_node,
                                          ObColumnResolveStat &reslove_stat);
+  /**
+   * Resolve the "AI COLUMN (...) WITH (...)" column attribute. The parsed
+   * specification is collected in ai_column_infos_ so that the hidden
+   * companion columns can be created once every user column is resolved.
+   */
+  int resolve_ai_column_attribute(share::schema::ObColumnSchemaV2 &column,
+                                   ParseNode *attr_node,
+                                   ObColumnResolveStat &reslove_stat,
+                                   const share::schema::ObTableSchema &table_schema);
+  int resolve_ai_column_options(ParseNode *options_node, ObAiColumnSpec &spec);
+  int parse_ai_column_spec(const common::ObString &expr_text, ObAiColumnSpec &spec);
+  int check_ai_column_dimension(const share::schema::ObColumnSchemaV2 &column,
+                                 ObAiColumnSpec &spec);
+  int gen_ai_column_spec_text(const ObAiColumnSpec &spec, common::ObString &spec_text);
+  int gen_ai_column_normalized_expr(const share::schema::ObColumnSchemaV2 &column,
+                                     const ObAiColumnSpec &spec,
+                                     common::ObString &normalized_expr);
+  int create_ai_column_hidden_columns(share::schema::ObTableSchema &table_schema);
+  int build_ai_column_hidden_column(const ObAiColumnInfo &ai_info,
+                                     uint64_t column_id,
+                                     int64_t kind,
+                                     share::schema::ObColumnSchemaV2 &column);
+  static int split_ai_func_args(const common::ObString &expr_text,
+                                common::ObIArray<common::ObString> &args);
+  static bool is_ai_identifier_char(char c);
+  int check_ai_column_depends_on_ai_column(share::schema::ObTableSchema &table_schema);
+  int get_ai_column_hidden_name(const common::ObString &column_name,
+                                int64_t kind,
+                                common::ObString &hidden_name);
   int resolve_srid_node(share::schema::ObColumnSchemaV2 &column,
                         const ParseNode &srid_node);
   int resolve_column_skip_index(
@@ -859,6 +952,8 @@ protected:
   common::ObArray<common::ObString> store_column_names_;
   common::ObArray<common::ObString> hidden_store_column_names_;
   common::ObSEArray<share::schema::ObColumnNameWrapper, 16, common::ModulePageAllocator, true> sort_column_array_;
+  // AI columns found while resolving the column attributes of the statement.
+  common::ObSEArray<ObAiColumnInfo, 8> ai_column_infos_;
   common::hash::ObPlacementHashSet<share::schema::ObColumnNameHashWrapper,
                                    common::OB_MAX_COLUMN_NUMBER> storing_column_set_;
   common::hash::ObPlacementHashSet<share::schema::ObForeignKeyNameHashWrapper,

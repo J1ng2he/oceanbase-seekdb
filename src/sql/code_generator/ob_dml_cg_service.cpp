@@ -24,6 +24,7 @@
 #include "sql/optimizer/ob_log_update.h"
 #include "sql/das/ob_domain_id.h"
 #include "query/vector/ob_vector_index_util.h"
+#include "share/ai_service/ob_ai_service_struct.h"
 
 namespace oceanbase
 {
@@ -2159,6 +2160,42 @@ int ObDmlCgService::generate_dml_base_ctdef(ObLogDelUpd &op,
   if (OB_SUCC(ret) && index_dml_info.is_primary_index_) {
     //add trigger
     if (OB_FAIL(convert_triggers(op, index_dml_info, dml_base_ctdef, dml_event))) {
+    }
+  }
+  if (OB_SUCC(ret) && index_dml_info.is_primary_index_) {
+    // the AI columns of the table have to be invalidated by the DML, the tasks
+    // are written in the same transaction, so a nested statement is needed
+    if (OB_FAIL(check_ai_columns(index_dml_info, dml_base_ctdef))) {
+    }
+  }
+  return ret;
+}
+
+int ObDmlCgService::check_ai_columns(const IndexDMLInfo &index_dml_info,
+                                      ObDMLBaseCtDef &dml_base_ctdef)
+{
+  int ret = OB_SUCCESS;
+  const ObTableSchema *table_schema = nullptr;
+  ObSchemaGetterGuard *schema_guard = cg_.opt_ctx_->get_schema_guard();
+  if (OB_ISNULL(schema_guard)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_FAIL(schema_guard->get_table_schema(index_dml_info.ref_table_id_, table_schema))) {
+  } else if (OB_ISNULL(table_schema)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    bool has_ai_column = false;
+    ObTableSchema::const_column_iterator iter = table_schema->column_begin();
+    for (; iter != table_schema->column_end(); ++iter) {
+      if ((*iter)->is_ai_column()) {
+        has_ai_column = true;
+        break;
+      }
+    }
+    if (has_ai_column) {
+      dml_base_ctdef.has_ai_column_ = true;
+      dml_base_ctdef.ai_table_id_ = index_dml_info.ref_table_id_;
+      // the AI tasks are written with a nested statement on the same session
+      cg_.phy_plan_->set_has_nested_sql(true);
     }
   }
   return ret;

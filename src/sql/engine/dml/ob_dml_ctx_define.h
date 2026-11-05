@@ -438,6 +438,12 @@ public:
   bool reserved_advanced_trigger_;
   ObExpr *trans_info_expr_;
   bool is_vec_hnsw_index_vid_opt_;
+  // the target table has AI columns, the DML has to maintain the AI column
+  // tasks in the same transaction
+  bool has_ai_column_;
+  // the id of the table that owns the AI columns, it is the id of the table
+  // that the primary index DML works on
+  uint64_t ai_table_id_;
 protected:
   ObDMLBaseCtDef(common::ObIAllocator &alloc,
                  ObDASDMLBaseCtDef &das_base_ctdef,
@@ -456,7 +462,9 @@ protected:
       is_table_without_pk_(false),
       reserved_advanced_trigger_(false),
       trans_info_expr_(nullptr),
-      is_vec_hnsw_index_vid_opt_(false)
+      is_vec_hnsw_index_vid_opt_(false),
+      has_ai_column_(false),
+      ai_table_id_(OB_INVALID_ID)
   { }
 };
 
@@ -1049,7 +1057,11 @@ public:
             dml_op_(dml_op),
             dml_ctdef_(dml_ctdef),
             dml_rtdef_(dml_rtdef),
-            dml_event_(dml_event)
+            dml_event_(dml_event),
+            ai_invalidated_mask_(0),
+            ai_pk_predicate_(),
+            ai_pk_value_(),
+            ai_old_pk_value_()
   {}
 
   TO_STRING_KV(KPC_(new_row),
@@ -1063,6 +1075,18 @@ public:
   const ObDMLBaseCtDef *dml_ctdef_;
   ObDMLBaseRtDef *dml_rtdef_;
   ObDmlEventType dml_event_;
+  // The AI columns of the row that have to be invalidated, the bit i is the
+  // column i of the array of the AI columns of the table.  The values are read
+  // while the row is processed, they are the values of the row only at that
+  // moment, so they are captured here.
+  uint64_t ai_invalidated_mask_;
+  // The predicate of the row, e.g. "`id` = 1", and the values of the primary
+  // key of the row, e.g. "1".
+  common::ObString ai_pk_predicate_;
+  common::ObString ai_pk_value_;
+  // The values of the primary key of the row before the update, they are empty
+  // when the primary key did not change.
+  common::ObString ai_old_pk_value_;
 };
 
 typedef common::ObList<ObDMLModifyRowNode, common::ObIAllocator> ObDMLModifyRowsList;

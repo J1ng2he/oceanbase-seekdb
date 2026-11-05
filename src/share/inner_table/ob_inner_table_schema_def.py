@@ -2447,6 +2447,7 @@ all_ai_model_endpoint_def = dict(
 def_table_schema(**all_ai_model_endpoint_def)
 
 
+
 all_objauth_mysql_def = dict(
     owner = 'cjl476581',
     table_name     = '__all_objauth_mysql',
@@ -2466,6 +2467,33 @@ all_objauth_mysql_def = dict(
   )
 def_table_schema(**all_objauth_mysql_def)
 def_table_schema(**gen_history_table_def(1134, all_objauth_mysql_def))
+
+# The pending AI column computation tasks. A task row is written in the same
+# transaction as the data change that invalidated the AI column, so that the
+# task is visible inside the transaction and disappears when it is rolled back.
+all_ai_column_task_def = dict(
+  owner = 'seekdb.ai_column',
+  table_name = '__all_ai_column_task',
+  table_id = '1140',
+  table_type = 'SYSTEM_TABLE',
+  gm_columns = ['gmt_create', 'gmt_modified'],
+  rowkey_columns = [
+    ('task_id', 'varchar:64')
+  ],
+
+  is_cluster_private = False,
+  meta_record_in_sys = False,
+  normal_columns = [
+    ('table_id', 'int', 'false'),
+    ('column_id', 'int', 'false'),
+    ('rowkey_predicate', 'varchar:1024'),
+    ('request_id', 'varchar:64'),
+    ('state', 'int', 'false', '0'),
+    ('retry_count', 'int', 'false', '0'),
+    ('eligible_ts', 'timestamp')
+  ]
+)
+def_table_schema(**all_ai_column_task_def)
 
 
 # Reserved position (placeholder before this line)
@@ -13863,6 +13891,42 @@ def_table_schema(
       FETCH_LSN,
       FETCH_SCN
     FROM oceanbase.__all_virtual_change_stream_refresh_stat
+  """.replace("\n", " ")
+)
+
+# The metadata of the AI columns. The view derives the rows from the column
+# schema: an AI column is a column whose column_flags carry the AI column bit,
+# and its three hidden companion columns are found by their names.
+def_table_schema(
+  owner           = 'seekdb.ai_column',
+  table_name      = '__all_ai_column',
+  table_id        = '21669',
+  table_type      = 'SYSTEM_VIEW',
+  database_id     = 'OB_SYS_DATABASE_ID',
+  gm_columns      = [],
+  rowkey_columns  = [],
+  normal_columns  = [],
+  view_definition =
+  """
+  SELECT a.table_id AS table_id,
+         a.column_id AS column_id,
+         a.column_name AS column_name,
+         st.column_id AS state_column_id,
+         rq.column_id AS request_column_id,
+         sp.column_id AS result_spec_column_id,
+         CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(sp.comment, 'max_retries=', -1), ';', 1) AS SIGNED) AS max_retries,
+         SUBSTRING_INDEX(SUBSTRING_INDEX(sp.comment, 'normalized_expr=', -1), ';', 1) AS normalized_expr
+  FROM oceanbase.__all_column a
+  LEFT JOIN oceanbase.__all_column st
+    ON st.table_id = a.table_id
+   AND st.column_name = CONCAT('__ai_s_', LEFT(a.column_name, 122))
+  LEFT JOIN oceanbase.__all_column rq
+    ON rq.table_id = a.table_id
+   AND rq.column_name = CONCAT('__ai_r_', LEFT(a.column_name, 121))
+  LEFT JOIN oceanbase.__all_column sp
+    ON sp.table_id = a.table_id
+   AND sp.column_name = CONCAT('__ai_p_', LEFT(a.column_name, 122))
+  WHERE (a.column_flags & 128) <> 0
   """.replace("\n", " ")
 )
 

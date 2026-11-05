@@ -896,6 +896,12 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
       }
     }
 
+    // create the hidden companion columns of the AI columns
+    if (OB_SUCC(ret) && ai_column_infos_.count() > 0) {
+      if (OB_FAIL(create_ai_column_hidden_columns(table_schema))) {
+      }
+    }
+
     // A table must have at least one column as a visible column
     if (OB_SUCC(ret)) {
       // RESOLVE_NON_COL == resolve_rule when, only parse non-column definitions

@@ -18,6 +18,7 @@
 #include "ob_result_set.h"
 #include "data_plane/transaction/ob_tx_desc_access.h"
 #include "share/rc/ob_server_runtime.h"
+#include "share/ai_service/ob_ai_service_struct.h"
 #include "sql/resolver/dml/ob_del_upd_stmt.h"
 #include "rpc/obmysql/ob_mysql_field.h"
 #include "sql/engine/px/ob_px_admission.h"

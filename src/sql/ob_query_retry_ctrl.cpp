@@ -504,7 +504,8 @@ private:
                          && parent_ctx->get_pl_stack_ctx() != nullptr);
     bool is_fk_nested = (parent_ctx != nullptr && parent_ctx->get_das_ctx().is_fk_cascading_);
     bool is_online_stat_gathering_nested = (parent_ctx != nullptr && parent_ctx->is_online_stats_gathering());
-    return is_pl_nested || is_fk_nested || is_online_stat_gathering_nested;
+    bool is_ai_column_nested = (parent_ctx != nullptr && parent_ctx->get_das_ctx().is_ai_column_nested_);
+    return is_pl_nested || is_fk_nested || is_online_stat_gathering_nested || is_ai_column_nested;
   }
 
 };

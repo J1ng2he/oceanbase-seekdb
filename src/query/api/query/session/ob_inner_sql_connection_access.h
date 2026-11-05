@@ -55,6 +55,13 @@ public:
       sql::ObSQLSessionInfo *session,
       common::sqlclient::ObISQLConnectionGuard &connection);
 
+  // Create a connection that has a session of its own.  A statement that runs
+  // on it uses a transaction of its own, it does not touch the transaction of
+  // the session of the user.  It is used by the checks that read the state of
+  // the database while a statement of the user is running.
+  static int create_connection_with_owned_session(
+      common::sqlclient::ObISQLConnectionGuard &connection);
+
   static int create_spi_connection_with_external_session(
       sql::ObSQLSessionInfo *session,
       common::sqlclient::ObISQLConnectionGuard &connection);

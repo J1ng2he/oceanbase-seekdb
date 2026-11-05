@@ -24,6 +24,7 @@
 #include "query/session/ob_inner_sql_connection_access.h"
 #include "lib/stat/ob_diagnostic_info_guard.h"
 #include "share/rc/ob_server_runtime.h"
+#include "share/ai_service/ob_ai_service_struct.h"
 #include "sql/engine/ob_physical_plan.h"
 #include "storage/tx/ob_trans_service.h"
 #include "share/ob_time_utility2.h"
@@ -1481,6 +1482,13 @@ int ObInnerSQLConnectionAccess::create_connection_with_external_session(
 {
   return observer::ObInnerSQLConnection::create_connection_with_external_session(
       session, connection);
+}
+
+int ObInnerSQLConnectionAccess::create_connection_with_owned_session(
+  common::sqlclient::ObISQLConnectionGuard &connection)
+{
+  return observer::ObInnerSQLConnection::create_connection_with_owned_session(
+      false /*use_static_engine*/, 0 /*group_id*/, connection);
 }
 
 int ObInnerSQLConnectionAccess::create_spi_connection_with_external_session(

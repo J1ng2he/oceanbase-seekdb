@@ -22,6 +22,7 @@
 #include "data_plane/ob_i_write_context_service.h"
 #include "sql/das/ob_das_context.h"
 #include "ob_table_modify_op.h"
+#include "lib/container/ob_fast_array.h"
 
 namespace oceanbase
 {
@@ -257,6 +258,51 @@ public:
   // static int handle_after_processing_batch(const ObTableModifyOp *op,
   //                                           ObDMLModifyRowsList *dml_modify_rows);
   static int handle_after_row_processing(ObTableModifyOp *op, ObDMLModifyRowsList *dml_modify_rows);
+  // Invalidate the AI columns of the modified rows and maintain the AI column
+  // tasks.  The task rows are written with a nested statement on the same
+  // session, so they are in the same transaction as the data change.
+  static int handle_ai_column_processing(ObTableModifyOp *op, ObDMLModifyRowsList *dml_modify_rows);
+  static int process_ai_columns(ObTableModifyOp *op,
+                                ObDMLModifyRowsList *dml_modify_rows,
+                                const ObDMLBaseCtDef &ctdef,
+                                const share::schema::ObTableSchema &table_schema,
+                                const char *database_name,
+                                const common::ObIArray<const share::schema::ObColumnSchemaV2 *> &ai_columns,
+                                const common::ObIArray<const share::schema::ObColumnSchemaV2 *> &state_columns,
+                                const common::ObIArray<const share::schema::ObColumnSchemaV2 *> &request_columns,
+                                const common::ObIArray<const share::schema::ObColumnSchemaV2 *> &spec_columns);
+  // Decide which AI columns of an updated row have to be invalidated and read
+  // the values of the primary key of the row.  It is called while the row is
+  // processed, the expressions of the statement hold the values of the row
+  // only at that moment.
+  static int capture_ai_update_row(ObTableModifyOp *op,
+                                    const ObDMLBaseCtDef &ctdef,
+                                    ObDMLModifyRowNode &modify_row);
+  // Build the statements that invalidate the AI columns of one row and that
+  // maintain its tasks.  The statements are not executed here, the values of
+  // the row are read from the expressions of the statement, and a nested
+  // statement changes them, so the statements of all the rows have to be built
+  // before the first one of them is executed.
+  static int build_ai_column_statements(ObTableModifyOp *op,
+                                         const ObDMLBaseCtDef &ctdef,
+                                         const share::schema::ObTableSchema &table_schema,
+                                         const char *database_name,
+                                         ObDMLModifyRowNode &modify_row,
+                                         const common::ObIArray<const share::schema::ObColumnSchemaV2 *> &ai_columns,
+                                         const common::ObIArray<const share::schema::ObColumnSchemaV2 *> &state_columns,
+                                         const common::ObIArray<const share::schema::ObColumnSchemaV2 *> &request_columns,
+                                         const common::ObIArray<const share::schema::ObColumnSchemaV2 *> &spec_columns,
+                                         const common::ObIArray<int64_t> &invalidated,
+                                         bool is_delete,
+                                         const common::ObString &pk_predicate,
+                                         const common::ObString &pk_value,
+                                         const common::ObString &old_pk_value,
+                                         common::ObFastArray<common::ObString> &statements);
+  // Execute the statements of the AI columns on the session of the statement
+  // that invalidated the AI columns, so they are in the same transaction as
+  // the data change.
+  static int execute_ai_column_statements(ObTableModifyOp *op,
+                                           const common::ObFastArray<common::ObString> &statements);
   static int init_ob_rowkey( ObIAllocator &allocator, const int64_t rowkey_cnt, ObRowkey &table_rowkey);
   static int add_trans_info_datum(ObExpr *trans_info_expr,
                                   ObEvalCtx &eval_ctx,

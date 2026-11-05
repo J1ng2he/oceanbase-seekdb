@@ -5573,6 +5573,7 @@ int ObStaticEngineCG::generate_spec(ObLogJsonTable &op, ObJsonTableSpec &spec,
     if (OB_FAIL(spec.dup_origin_column_defs(op.get_origin_cols_def()))) {
     }
 
+
     for (int64_t i = 0; OB_SUCC(ret) && i < op.get_output_exprs().count(); ++i) {
       if (OB_FAIL(mark_expr_self_produced(op.get_output_exprs().at(i)))) {
       }
@@ -5637,6 +5638,14 @@ int ObStaticEngineCG::generate_spec(ObLogJsonTable &op, ObJsonTableSpec &spec,
             OZ (spec.emp_default_exprs_.push_back(emp_expr));
           }
         }
+      }
+    }
+
+    if (OB_SUCC(ret) && spec.table_type_ == MulModeTableType::OB_FILE_TABLE_TYPE) {
+      for (int64_t i = 0; i < spec.cols_def_.count(); ++i) {
+        const ObJtColInfo &info = *spec.cols_def_.at(i);
+      }
+      for (int64_t i = 0; i < spec.column_exprs_.count(); ++i) {
       }
     }
   }

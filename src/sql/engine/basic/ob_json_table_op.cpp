@@ -21,6 +21,7 @@
 #include "sql/engine/expr/ob_expr_json_query.h"
 #include "common/xml/ob_binary_aggregate.h"
 #include "sql/engine/expr/ob_array_expr_utils.h"
+#include "share/object/ob_obj_cast.h"
 
 namespace oceanbase
 {
@@ -333,8 +334,10 @@ OB_DEF_SERIALIZE(ObJsonTableSpec)
     for (size_t i = 1; OB_SUCC(ret) && i < value_exprs_.count(); ++i) {
       OB_UNIS_ENCODE(value_exprs_.at(i));
     }
+  } else if (table_type_ == MulModeTableType::OB_FILE_TABLE_TYPE) {
+    OB_UNIS_ENCODE(table_type_);
   }
-  
+
   return ret;
 }
 
@@ -361,6 +364,8 @@ OB_DEF_SERIALIZE_SIZE(ObJsonTableSpec)
     for (size_t i = 1; i < value_exprs_.count(); ++i) {
       OB_UNIS_ADD_LEN(value_exprs_.at(i));
     }
+  } else if (table_type_ == MulModeTableType::OB_FILE_TABLE_TYPE) {
+    OB_UNIS_ADD_LEN(table_type_);
   }
   return len;
 }
@@ -395,6 +400,8 @@ OB_DEF_DESERIALIZE(ObJsonTableSpec)
       if (OB_FAIL(cols_def_.push_back(col_info))) {
       } else if (col_info->col_type_ == COL_TYPE_UNNEST) {
         table_type_flag = OB_UNNEST_TABLE;
+      } else if (col_info->col_type_ == COL_TYPE_FILE) {
+        table_type_flag = OB_FILE_TABLE;
       }
     }
   }
@@ -412,6 +419,12 @@ OB_DEF_DESERIALIZE(ObJsonTableSpec)
       OB_UNIS_DECODE(value_expr);
       if (OB_SUCC(ret) && OB_FAIL(value_exprs_.push_back(value_expr))) {
       }
+    }
+  } else if (table_type_flag == OB_FILE_TABLE) {
+    OB_UNIS_DECODE(table_type_);
+    if (OB_FAIL(ret)) {
+    } else if (OB_FAIL(value_exprs_.init(1))) {
+    } else if (OB_FAIL(value_exprs_.push_back(value_expr))) {
     }
   } else if (OB_FAIL(value_exprs_.init(1))) {
   } else if (OB_FAIL(value_exprs_.push_back(value_expr))) {
@@ -674,6 +687,13 @@ int ObJsonTableOp::init()
       } else if (OB_ISNULL(jt_ctx_.table_func_ = new (table_func_buf) UnnestTableFunc())) {
         ret = OB_ERR_UNEXPECTED;
       }
+    } else if (jt_ctx_.is_file_table_func()) {
+      table_func_buf = jt_ctx_.op_exec_alloc_->alloc(sizeof(FileTableFunc));
+      if (OB_ISNULL(table_func_buf)) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      } else if (OB_ISNULL(jt_ctx_.table_func_ = new (table_func_buf) FileTableFunc())) {
+        ret = OB_ERR_UNEXPECTED;
+      }
     }
   }
   jt_ctx_.is_cover_error_ = false;
@@ -695,6 +715,7 @@ int ObJsonTableOp::inner_close()
   }
   jt_ctx_.row_alloc_.clear();
   if (OB_NOT_NULL(jt_ctx_.table_func_) && OB_NOT_NULL(jt_ctx_.op_exec_alloc_)) {
+    jt_ctx_.table_func_->destroy();
     jt_ctx_.op_exec_alloc_->free(jt_ctx_.table_func_);
   }
   return ret;
@@ -1124,6 +1145,9 @@ int ObRegCol::eval_regular_col(void *in, JtScanCtx* ctx, bool& is_null_value)
   } else if (col_type == COL_TYPE_UNNEST) {
     if (OB_FAIL(RegularCol::eval_unnest_col(*this, in, ctx, col_expr))) {
     }
+  } else if (col_type == COL_TYPE_FILE) {
+    if (OB_FAIL(RegularCol::eval_file_col(*this, in, ctx, col_expr, is_null_value))) {
+    }
   } else if (col_type == COL_TYPE_ORDINALITY) {
     if (OB_ISNULL(in)) {
       col_expr->locate_datum_for_write(*ctx->eval_ctx_).set_null();
@@ -1403,7 +1427,8 @@ int ObJsonTableOp::inner_get_next_row()
   INIT_SUCC(ret);
   bool is_root_null = false;
   if (!(jt_ctx_.is_json_table_func()
-        || jt_ctx_.is_unnest_table_func())) {
+        || jt_ctx_.is_unnest_table_func()
+        || jt_ctx_.is_file_table_func())) {
     ret = OB_ERR_UNEXPECTED;
   } else if (is_evaled_) {
     clear_evaluated_flag();
@@ -2120,6 +2145,231 @@ int JsonTableFunc::container_at(void* in, void *&out, int32_t pos) {
     out = res;
   }
 
+  return ret;
+}
+
+// ---------------------------------------------------------------------------
+// the file table functions
+// ---------------------------------------------------------------------------
+
+int FileTableFunc::init_ctx(ObRegCol &scan_node, JtScanCtx*& ctx)
+{
+  INIT_SUCC(ret);
+  scan_node.tab_type_ = MulModeTableType::OB_FILE_TABLE_TYPE;
+  return ret;
+}
+
+int FileTableFunc::reset_ctx(ObRegCol &scan_node, JtScanCtx*& ctx)
+{
+  INIT_SUCC(ret);
+  // the file is opened again by eval_input, a rescan starts at the first row
+  return ret;
+}
+
+// the reader of the file is placed in the memory of the operator, the file
+// that it holds has to be closed when the operator closes
+void FileTableFunc::destroy()
+{
+  if (OB_NOT_NULL(reader_)) {
+    reader_->close();
+  }
+}
+
+int FileTableFunc::eval_input(ObJsonTableOp &jt, JtScanCtx &ctx, ObEvalCtx &eval_ctx)
+{
+  INIT_SUCC(ret);
+  ObExpr *path_expr = ctx.spec_ptr_->value_exprs_.at(0);
+  ObDatum *datum = nullptr;
+  ObString path;
+  ObString file_spec;
+  ObFileTableOptions options;
+  // the file table functions are disabled by default, the switch is checked
+  // again while the statement is executed, a plan that was built while the
+  // switch was on must not read a file any more
+  bool enable_file_sql = false;
+  ObSQLSessionInfo *session = eval_ctx.exec_ctx_.get_my_session();
+  if (OB_ISNULL(session)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_FAIL(session->get_sys_variable(share::SYS_VAR_ENABLE_FILE_SQL, enable_file_sql))) {
+  } else if (!enable_file_sql) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "the file table functions, please enable enable_file_sql first");
+  }
+  if (OB_ISNULL(path_expr)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_FAIL(path_expr->eval(eval_ctx, datum))) {
+  } else if (OB_ISNULL(datum) || datum->is_null()) {
+    ret = OB_ITER_END;
+  } else {
+    path = datum->get_string();
+  }
+
+  if (OB_SUCC(ret)) {
+    // the root column of the table carries the path and the options of the file
+    if (ctx.spec_ptr_->cols_def_.count() < 1) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(ObFileTableSource::decode_file_table_spec(*ctx.op_exec_alloc_,
+                                                                  ctx.spec_ptr_->cols_def_.at(0)->path_,
+                                                                  file_spec,
+                                                                  options))) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      func_type_ = options.func_type_;
+      path_ = path;
+    }
+  }
+
+  if (OB_SUCC(ret)) {
+    if (OB_ISNULL(reader_)) {
+      void *reader_buf = ctx.op_exec_alloc_->alloc(sizeof(ObFileTableReader));
+      if (OB_ISNULL(reader_buf)) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      } else {
+        reader_ = new (reader_buf) ObFileTableReader();
+      }
+    }
+    if (OB_SUCC(ret)) {
+      // the names of the columns are needed to look up the fields of a json file
+      column_names_.reset();
+      for (int64_t i = 0; OB_SUCC(ret) && i < ctx.spec_ptr_->cols_def_.count(); ++i) {
+        const ObJtColInfo &info = *ctx.spec_ptr_->cols_def_.at(i);
+        if (info.col_type_ == COL_TYPE_FILE) {
+          if (OB_FAIL(column_names_.push_back(info.col_name_))) {
+            ret = OB_ALLOCATE_MEMORY_FAILED;
+          }
+        }
+      }
+      if (OB_SUCC(ret)) {
+        // a rescan starts at the first row of the file
+        reader_->close();
+        if (OB_FAIL(ret = reader_->open(*ctx.op_exec_alloc_, path, options, &column_names_))) {
+          LOG_WARN("cannot open the file of the table function", K(ret), K(path));
+        }
+      }
+    }
+  }
+
+  if (OB_SUCC(ret)) {
+    jt.reset_columns();
+    // the reader is the input of the scan, it stays the same during the scan
+    jt.input_ = reader_;
+  }
+  return ret;
+}
+
+int FileTableFunc::reset_path_iter(ObRegCol &scan_node, void* in, JtScanCtx*& ctx, ScanType init_flag, bool &is_null_value)
+{
+  INIT_SUCC(ret);
+  if (SCAN_NODE_TYPE == init_flag) {
+    if (OB_ISNULL(reader_)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      const int next_ret = reader_->next_row();
+      if (OB_ITER_END == next_ret) {
+        // the file has no row at all
+        is_null_value = true;
+        scan_node.cur_pos_ = 0;
+        scan_node.total_ = 1;
+        scan_node.curr_ = scan_node.iter_ = nullptr;
+      } else if (OB_FAIL(next_ret)) {
+        ret = next_ret;
+      } else {
+        is_null_value = false;
+        scan_node.cur_pos_ = 0;
+        scan_node.total_ = 1;
+        scan_node.curr_ = scan_node.iter_ = reader_;
+      }
+    }
+  }
+  return ret;
+}
+
+int FileTableFunc::get_iter_value(ObRegCol &col_node, JtScanCtx* ctx, bool &is_null_value)
+{
+  INIT_SUCC(ret);
+  if (OB_ISNULL(reader_)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    const int next_ret = reader_->next_row();
+    if (OB_ITER_END == next_ret) {
+      ret = OB_ITER_END;
+    } else if (OB_FAIL(next_ret)) {
+      ret = next_ret;
+    } else {
+      is_null_value = false;
+      ++col_node.cur_pos_;
+      col_node.curr_ = col_node.iter_ = reader_;
+    }
+  }
+  return ret;
+}
+
+// converts the text of a field of the file into the type of the column
+static int set_file_col_datum(ObRegCol &col_node, JtScanCtx* ctx, ObExpr* col_expr,
+                              const ObString &value, ObDatum &res_datum)
+{
+  int ret = OB_SUCCESS;
+  const ObObjType dst_type = col_expr->datum_meta_.type_;
+  ObString text = value;
+  if ((ObDateTimeType == dst_type || ObTimestampType == dst_type)
+      && text.length() > 10
+      && 'T' == text.ptr()[10]) {
+    // the separator of a timestamp may be a 'T', the sql syntax uses a space
+    char *buf = static_cast<char *>(ctx->row_alloc_.alloc(text.length()));
+    if (OB_ISNULL(buf)) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      memcpy(buf, text.ptr(), (size_t)text.length());
+      buf[10] = ' ';
+      text.assign_ptr(buf, text.length());
+    }
+  }
+  if (OB_SUCC(ret)) {
+    if (ob_is_integer_type(dst_type)
+        && (0 == text.case_compare("true") || 0 == text.case_compare("false"))) {
+      // a boolean of a file is stored as 1 or 0
+      res_datum.set_int32(0 == text.case_compare("true") ? 1 : 0);
+    } else {
+      ObObj src_obj;
+      src_obj.set_varchar(text);
+      src_obj.set_collation_type(CS_TYPE_UTF8MB4_BIN);
+      ObObj dst_obj;
+      ObCastCtx cast_ctx(&ctx->row_alloc_, nullptr, CM_NONE, CS_TYPE_UTF8MB4_BIN);
+      if (OB_FAIL(ObObjCaster::to_type(dst_type, cast_ctx, src_obj, dst_obj))) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("cannot convert the value of the file", K(ret), K(dst_type), K(text));
+      } else if (OB_FAIL(res_datum.from_obj(dst_obj))) {
+      }
+    }
+  }
+  return ret;
+}
+
+int RegularCol::eval_file_col(ObRegCol &col_node, void* in, JtScanCtx* ctx, ObExpr* col_expr, bool& is_null_value)
+{
+  INIT_SUCC(ret);
+  UNUSED(in);
+  is_null_value = false;
+  ObDatum &res_datum = col_expr->locate_datum_for_write(*ctx->eval_ctx_);
+  // the id of the column is the index of the column of the file plus one
+  const int64_t file_col_index = col_node.col_info_.id_ - 1;
+  ObString value;
+  bool is_null = false;
+  if (OB_ISNULL(ctx->table_func_)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    FileTableFunc *file_func = static_cast<FileTableFunc *>(ctx->table_func_);
+    ObFileTableReader *reader = file_func->get_reader();
+    if (OB_ISNULL(reader)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(reader->get_value(file_col_index, value, is_null))) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (is_null) {
+      res_datum.set_null();
+      is_null_value = true;
+    } else if (OB_FAIL(set_file_col_datum(col_node, ctx, col_expr, value, res_datum))) {
+    }
+  }
   return ret;
 }
 

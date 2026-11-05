@@ -25,6 +25,7 @@
 #include "sql/plan_cache/ob_pcv_set.h"
 #include "sql/ob_sql_init.h"
 #include "sql/resolver/ob_resolver.h"
+#include "sql/resolver/dml/ob_select_stmt.h"
 #include "sql/resolver/cmd/ob_variable_set_stmt.h"
 #include "sql/resolver/cmd/ob_call_procedure_stmt.h"
 #include "sql/resolver/cmd/ob_anonymous_block_stmt.h"
@@ -38,6 +39,8 @@
 #include "sql/monitor/show_trace/ob_show_trace.h"
 #include "sql/optimizer/ob_optimizer.h"
 #include "share/rc/ob_server_runtime.h"
+#include "share/schema/ob_column_schema.h"
+#include "share/schema/ob_table_schema.h"
 
 namespace oceanbase
 {
@@ -2734,6 +2737,79 @@ int ObSql::optimize_stmt(
   return ret;
 }
 
+namespace
+{
+// The maximum depth of the statements that are visited when the AI columns of
+// a statement are collected.  The statements of the sub queries and of the set
+// operations are visited, the depth of the nesting of the statements is small.
+const int32_t MAX_AI_COLUMN_REF_DEPTH = 16;
+
+// Collect the AI columns that the statement refers to.  The strict read of the
+// AI columns rejects a statement that uses an AI column whose value is not
+// ready yet, a statement that does not use an AI column is never rejected.
+int collect_ai_column_refs(ObDMLStmt *stmt,
+                           ObSchemaGetterGuard *schema_guard,
+                           ObPhysicalPlan *phy_plan,
+                           int32_t depth)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(stmt) || OB_ISNULL(schema_guard) || OB_ISNULL(phy_plan)) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (depth > MAX_AI_COLUMN_REF_DEPTH) {
+    // the nesting of the statements is too deep, the deepest statement is not
+    // checked, the statement is not rejected because of the depth
+    ret = OB_SUCCESS;
+  } else {
+    // The columns of an insert statement are the columns that are written by
+    // the statement, they are not read by it, so they are not checked.  The
+    // columns of the source of the insert belong to a statement of its own,
+    // they are checked by the recursion below.
+    const bool is_insert = stmt->is_insert_stmt();
+    if (!is_insert) {
+      const ObIArray<ColumnItem> &column_items = stmt->get_column_items();
+      for (int64_t i = 0; OB_SUCC(ret) && i < column_items.count(); ++i) {
+        const ColumnItem &column_item = column_items.at(i);
+        const TableItem *table_item = stmt->get_table_item_by_id(column_item.table_id_);
+        if (OB_ISNULL(table_item) || !table_item->is_basic_table()) {
+          // the column of a table that is not a base table, a view or a
+          // function table, is not an AI column of a base table
+          continue;
+        }
+        const ObTableSchema *table_schema = NULL;
+        if (OB_FAIL(schema_guard->get_table_schema(table_item->ref_id_, table_schema))
+            || OB_ISNULL(table_schema)) {
+          // the table is gone, the statement is rejected by the schema check
+          continue;
+        }
+        const ObColumnSchemaV2 *column_schema = table_schema->get_column_schema(column_item.column_id_);
+        if (OB_ISNULL(column_schema) || !column_schema->is_ai_column()) {
+          continue;
+        }
+        if (OB_FAIL(phy_plan->add_ai_column_ref(table_item->ref_id_, column_item.column_id_))) {
+          SQL_LOG(WARN, "failed to add the reference of an AI column", K(ret));
+        }
+      }
+    }
+    // The statements of the sub queries and of the set operations are visited,
+    // a statement that uses an AI column in a sub query uses it too.
+    ObSEArray<ObSelectStmt *, 8> child_stmts;
+    if (OB_FAIL(stmt->get_child_stmts(child_stmts))) {
+      SQL_LOG(WARN, "failed to get the statements of the sub queries", K(ret));
+    } else {
+      for (int64_t i = 0; OB_SUCC(ret) && i < child_stmts.count(); ++i) {
+        if (OB_ISNULL(child_stmts.at(i))) {
+          continue;
+        }
+        if (OB_FAIL(collect_ai_column_refs(child_stmts.at(i), schema_guard, phy_plan, depth + 1))) {
+          SQL_LOG(WARN, "failed to collect the AI columns of a sub query", K(ret));
+        }
+      }
+    }
+  }
+  return ret;
+}
+} // namespace
+
 int ObSql::code_generate(
     ObSqlCtx &sql_ctx,
     ObResultSet &result,
@@ -2758,6 +2834,17 @@ int ObSql::code_generate(
       // session's ignore_stmt status for CG use, needs to be cleared after CG ends
       sql_ctx.session_info_->set_ignore_stmt(false);
       last_mem_usage = phy_plan->get_mem_size();
+    }
+  }
+  // The AI columns that the statement refers to are collected while the plan is
+  // built.  They are checked while the statement is executed, when the strict
+  // read of the AI columns is on.  The collection never rejects the statement,
+  // a statement whose AI columns cannot be collected is simply not checked.
+  if (OB_SUCC(ret) && OB_NOT_NULL(sql_ctx.schema_guard_)) {
+    int tmp_ret = OB_SUCCESS;
+    if (OB_FAIL(collect_ai_column_refs(stmt, sql_ctx.schema_guard_, phy_plan, 0))) {
+      tmp_ret = OB_ERR_UNEXPECTED;
+      SQL_LOG(WARN, "failed to collect the AI columns of the statement", K(tmp_ret));
     }
   }
   //add local_session_var array to phy_plan_ctx

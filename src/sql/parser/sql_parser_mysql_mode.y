@@ -334,6 +334,7 @@ END_P SET_VAR DELIMITER
 
         RECOVER REDUNDANT REFRESH RELAY RELAYLOG RELAY_LOG_FILE RELAY_LOG_POS RELAY_THREAD RELOAD REMOVE
         REPEATABLE RESET RESPECT RESTART RESTORE RESUME RETURNED_SQLSTATE RETURNS RETURNING REVERSE
+        RETRY
         REWRITE ROLLBACK ROLLUP ROUTINE ROW ROWID ROW_COUNT ROW_FORMAT ROWS RTREE
         RUN RECYCLEBIN REPLICATION ROTATE ROW_NUMBER RUDUNDANT RECURSIVE RANDOM REDO_TRANSPORT_OPTIONS
         RANK READ_ONLY RECOVERY REJECT ROLE
@@ -370,6 +371,8 @@ END_P SET_VAR DELIMITER
         OPTIMIZER_COSTS
 
         ORGANIZATION
+
+        READ_CSV READ_JSON READ_PARQUET GLOB
 //-----------------------------non_reserved keyword end---------------------------------------------
 %type <node> sql_stmt stmt_list stmt opt_end_p
 %type <node> select_stmt update_stmt delete_stmt
@@ -384,6 +387,8 @@ END_P SET_VAR DELIMITER
 %type <node> date_unit date_params timestamp_params
 %type <node> drop_table_stmt table_list drop_view_stmt table_or_tables
 %type <node> explain_stmt explainable_stmt format_name kill_stmt create_outline_stmt alter_outline_stmt drop_outline_stmt opt_outline_target
+%type <node> copy_stmt copy_option_clause copy_option_list copy_option copy_option_name copy_option_value
+%type <node> ai_column_def opt_ai_column_options ai_column_option_list ai_column_option
 %type <node> expr_list expr expr_const conf_const simple_expr simple_expr_list expr_or_default bit_expr bool_pri predicate explain_or_desc pl_expr_stmt
 %type <node> column_ref multi_delete_table
 %type <node> case_expr func_expr in_expr sub_query_flag search_expr
@@ -511,6 +516,7 @@ END_P SET_VAR DELIMITER
 %type <node> column_list_with_boost with_param_column_ref
 %type <node> es_sql_opt
 %type <node> hybrid_search_expr hybrid_search_param
+%type <node> file_table_func_expr file_func_arg_list file_func_named_arg_list file_func_named_arg file_func_path
 %type <node> vector_similarity_expr vector_similarity_metric
 %type <node> algorithm_opt lock_opt
 %type <node> flush_privileges_stmt opt_flush_privileges_scope
@@ -582,6 +588,7 @@ stmt:
   | drop_table_stmt         { $$ = $1; check_question_mark($$, result); }
   | drop_view_stmt          { $$ = $1; check_question_mark($$, result); }
   | explain_stmt            { $$ = $1; question_mark_issue($$, result); }
+  | copy_stmt               { $$ = $1; question_mark_issue($$, result); }
   | create_outline_stmt     { $$ = $1; question_mark_issue($$, result); }
   | alter_outline_stmt      { $$ = $1; question_mark_issue($$, result); }
   | drop_outline_stmt       { $$ = $1; check_question_mark($$, result); }
@@ -6239,6 +6246,77 @@ not NULLX
 {
   malloc_terminal_node($$, result->malloc_pool_, T_INVISIBLE);
 }
+| ai_column_def
+{
+  $$ = $1;
+}
+;
+
+/*****************************************************************************
+ *
+ *	the definition of an AI column
+ *
+ * an AI column holds the result of a call of a model, the database generates
+ * the result in the background:
+ *
+ *   tags JSON AI COLUMN (
+ *     AI_COMPLETE(text_model, CONCAT(classify, content))
+ *   ) WITH (sync_mode=async, max_retries=2)
+ *
+ *****************************************************************************/
+ai_column_def:
+AI COLUMN '(' expr ')' opt_ai_column_options
+{
+  dup_expr_string($4, result, @4.first_column, @4.last_column);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_AI_COLUMN_DEF, 2, $4, $6);
+}
+;
+
+opt_ai_column_options:
+WITH '(' ai_column_option_list ')'
+{
+  $$ = $3;
+}
+| /*EMPTY*/
+{
+  $$ = NULL;
+}
+;
+
+ai_column_option_list:
+ai_column_option
+{
+  ParseNode *option_link = NULL;
+  malloc_non_terminal_node(option_link, result->malloc_pool_, T_LINK_NODE, 2, $1, NULL);
+  $$ = option_link;
+}
+| ai_column_option_list ',' ai_column_option
+{
+  ParseNode *option_link = NULL;
+  malloc_non_terminal_node(option_link, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
+  $$ = option_link;
+}
+;
+
+ai_column_option:
+relation_name COMP_EQ expr
+{
+  ParseNode *name_node = NULL;
+  ParseNode *value_node = NULL;
+  malloc_terminal_node(name_node, result->malloc_pool_, T_VARCHAR);
+  dup_expr_string(name_node, result, @1.first_column, @1.last_column);
+  malloc_terminal_node(value_node, result->malloc_pool_, T_VARCHAR);
+  if (NULL != $3->str_value_ && $3->str_len_ > 0) {
+    /* The value the lexer produced carries no quotes, the source text does and
+     * the text of the statement may be rewritten while it is lexed.  Prefer
+     * the parsed value so that the option value is always the plain one. */
+    value_node->str_value_ = $3->str_value_;
+    value_node->str_len_ = $3->str_len_;
+  } else {
+    dup_expr_string(value_node, result, @3.first_column, @3.last_column);
+  }
+  malloc_non_terminal_node($$, result->malloc_pool_, T_AI_COLUMN_OPTION, 2, name_node, value_node);
+}
 ;
 
 opt_column_default_value_list:
@@ -10848,6 +10926,10 @@ tbl_name
 {
   $$ = $1;
 }
+| file_table_func_expr
+{
+  $$ = $1;
+}
 ;
 
 tbl_name:
@@ -12265,7 +12347,16 @@ explain_or_desc relation_factor opt_desc_column_option
   malloc_non_terminal_node($$, result->malloc_pool_, T_SHOW_COLUMNS, 4, $$, $2, NULL, $3);
 }
 
-| explain_or_desc explainable_stmt { GEN_EXPLAN_STMT($1, $$, 0, 0, $2, NULL, NULL);}
+| explain_or_desc explainable_stmt
+{
+  if (OB_NOT_NULL($1)) {
+    // a DESCRIBE statement, it describes the result of the statement instead
+    // of showing the plan of the statement
+    malloc_non_terminal_node($$, result->malloc_pool_, T_DESCRIBE_STMT, 1, $2);
+  } else {
+    GEN_EXPLAN_STMT($1, $$, 0, 0, $2, NULL, NULL);
+  }
+}
 | explain_or_desc PRETTY explainable_stmt { GEN_EXPLAN_STMT($1, $$, 0, T_PRETTY, $3, NULL, NULL);}
 | explain_or_desc PRETTY_COLOR explainable_stmt { GEN_EXPLAN_STMT($1, $$, 0, T_PRETTY_COLOR, $3, NULL, NULL);}
 
@@ -12306,8 +12397,8 @@ explain_or_desc relation_factor opt_desc_column_option
 
 explain_or_desc:
 EXPLAIN {$$ = NULL;}
-| DESCRIBE {$$ = NULL;}
-| DESC  {$$ = NULL;}
+| DESCRIBE {malloc_terminal_node($$, result->malloc_pool_, T_INT); $$->value_ = 1;}
+| DESC  {malloc_terminal_node($$, result->malloc_pool_, T_INT); $$->value_ = 1;}
 ;
 
 explainable_stmt:
@@ -12322,6 +12413,92 @@ TRADITIONAL
 { malloc_terminal_node($$, result->malloc_pool_, T_TRADITIONAL); }
 | JSON
 { malloc_terminal_node($$, result->malloc_pool_, T_FORMAT_JSON); }
+;
+
+/*****************************************************************************
+ *
+ *	copy grammar
+ *
+ * the statement writes the result of a query into a file, it uses the syntax
+ * of DuckDB:
+ *
+ *   copy (select c1 from t) to 'file.csv' (format csv, header, nullstr 'NULL')
+ *
+ *****************************************************************************/
+copy_stmt:
+COPY '(' select_stmt ')' TO text_string copy_option_clause
+{
+  ParseNode *option_list = NULL;
+  merge_nodes(option_list, result, T_COPY_OPTION_LIST, $7);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_COPY_STMT, 3, $3, $6, option_list);
+}
+;
+
+copy_option_clause:
+'(' copy_option_list ')'
+{
+  $$ = $2;
+}
+|
+{
+  $$ = NULL;
+}
+;
+
+copy_option_list:
+copy_option
+{
+  ParseNode *option_link = NULL;
+  malloc_non_terminal_node(option_link, result->malloc_pool_, T_LINK_NODE, 2, $1, NULL);
+  $$ = option_link;
+}
+| copy_option_list ',' copy_option
+{
+  ParseNode *option_link = NULL;
+  malloc_non_terminal_node(option_link, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
+  $$ = option_link;
+}
+;
+
+copy_option:
+copy_option_name
+{
+  // an option without a value, e.g. "header"
+  malloc_non_terminal_node($$, result->malloc_pool_, T_COPY_OPTION, 1, $1);
+}
+| copy_option_name copy_option_value
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_COPY_OPTION, 2, $1, $2);
+}
+;
+
+copy_option_name:
+NAME_OB
+{
+  malloc_terminal_node($$, result->malloc_pool_, T_COPY_OPTION_NAME);
+  $$->str_value_ = $1->str_value_;
+  $$->str_len_ = $1->str_len_;
+}
+| FORMAT
+{
+  malloc_terminal_node($$, result->malloc_pool_, T_COPY_OPTION_NAME);
+  dup_string_to_node($$, result->malloc_pool_, "format");
+}
+;
+
+copy_option_value:
+NAME_OB
+{
+  malloc_terminal_node($$, result->malloc_pool_, T_COPY_OPTION_VALUE);
+  $$->str_value_ = $1->str_value_;
+  $$->str_len_ = $1->str_len_;
+}
+| text_string
+{
+  malloc_terminal_node($$, result->malloc_pool_, T_COPY_OPTION_VALUE);
+  $$->str_value_ = $1->str_value_;
+  $$->str_len_ = $1->str_len_;
+}
 ;
 
 /*****************************************************************************
@@ -14740,6 +14917,15 @@ DROP CONSTRAINT constraint_name
   (void)($2);
   (void)($3);
   $$ = NULL;
+}
+| RETRY AI COLUMN column_name
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_AI_COLUMN_RETRY, 2, $4, NULL);
+}
+| RETRY AI COLUMN column_name WHERE expr
+{
+  dup_expr_string($6, result, @6.first_column, @6.last_column);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_AI_COLUMN_RETRY, 2, $4, $6);
 }
 ;
 
@@ -17479,6 +17665,128 @@ literal
 }
 ;
 
+file_table_func_expr:
+READ_CSV '(' file_func_arg_list ')'
+{
+  ParseNode *func_name = NULL;
+  ParseNode *alias_node = NULL;
+  make_name_node(func_name, result->malloc_pool_, "read_csv");
+  make_name_node(alias_node, result->malloc_pool_, "");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_FUNC, 3, func_name, $3, alias_node);
+}
+| READ_CSV '(' file_func_arg_list ')' relation_name
+{
+  ParseNode *func_name = NULL;
+  make_name_node(func_name, result->malloc_pool_, "read_csv");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_FUNC, 3, func_name, $3, $5);
+}
+| READ_CSV '(' file_func_arg_list ')' AS relation_name
+{
+  ParseNode *func_name = NULL;
+  make_name_node(func_name, result->malloc_pool_, "read_csv");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_FUNC, 3, func_name, $3, $6);
+}
+
+| READ_JSON '(' file_func_arg_list ')'
+{
+  ParseNode *func_name = NULL;
+  ParseNode *alias_node = NULL;
+  make_name_node(func_name, result->malloc_pool_, "read_json");
+  make_name_node(alias_node, result->malloc_pool_, "");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_FUNC, 3, func_name, $3, alias_node);
+}
+| READ_JSON '(' file_func_arg_list ')' relation_name
+{
+  ParseNode *func_name = NULL;
+  make_name_node(func_name, result->malloc_pool_, "read_json");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_FUNC, 3, func_name, $3, $5);
+}
+| READ_JSON '(' file_func_arg_list ')' AS relation_name
+{
+  ParseNode *func_name = NULL;
+  make_name_node(func_name, result->malloc_pool_, "read_json");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_FUNC, 3, func_name, $3, $6);
+}
+
+| READ_PARQUET '(' file_func_arg_list ')'
+{
+  ParseNode *func_name = NULL;
+  ParseNode *alias_node = NULL;
+  make_name_node(func_name, result->malloc_pool_, "read_parquet");
+  make_name_node(alias_node, result->malloc_pool_, "");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_FUNC, 3, func_name, $3, alias_node);
+}
+| READ_PARQUET '(' file_func_arg_list ')' relation_name
+{
+  ParseNode *func_name = NULL;
+  make_name_node(func_name, result->malloc_pool_, "read_parquet");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_FUNC, 3, func_name, $3, $5);
+}
+| READ_PARQUET '(' file_func_arg_list ')' AS relation_name
+{
+  ParseNode *func_name = NULL;
+  make_name_node(func_name, result->malloc_pool_, "read_parquet");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_FUNC, 3, func_name, $3, $6);
+}
+
+| GLOB '(' file_func_arg_list ')'
+{
+  ParseNode *func_name = NULL;
+  ParseNode *alias_node = NULL;
+  make_name_node(func_name, result->malloc_pool_, "glob");
+  make_name_node(alias_node, result->malloc_pool_, "");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_FUNC, 3, func_name, $3, alias_node);
+}
+| GLOB '(' file_func_arg_list ')' relation_name
+{
+  ParseNode *func_name = NULL;
+  make_name_node(func_name, result->malloc_pool_, "glob");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_FUNC, 3, func_name, $3, $5);
+}
+| GLOB '(' file_func_arg_list ')' AS relation_name
+{
+  ParseNode *func_name = NULL;
+  make_name_node(func_name, result->malloc_pool_, "glob");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_FUNC, 3, func_name, $3, $6);
+}
+file_func_arg_list:
+file_func_path
+{
+  merge_nodes($$, result, T_EXPR_LIST, $1);
+}
+| file_func_path ',' file_func_named_arg_list
+{
+  ParseNode *arg_chain = NULL;
+  malloc_non_terminal_node(arg_chain, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
+  merge_nodes($$, result, T_EXPR_LIST, arg_chain);
+}
+;
+
+file_func_path:
+expr
+{
+  $$ = $1;
+}
+;
+
+file_func_named_arg_list:
+file_func_named_arg
+{
+  $$ = $1;
+}
+| file_func_named_arg_list ',' file_func_named_arg
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
+}
+;
+
+file_func_named_arg:
+relation_name COMP_EQ expr
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_FUNC_NAMED_ARG, 2, $1, $3);
+}
+;
+
 unreserved_keyword:
 unreserved_keyword_for_role_name { $$=$1;}
 | unreserved_keyword_ambiguous_roles { $$=$1;}
@@ -17961,6 +18269,7 @@ ACCOUNT
 |       RESUME
 |       RETURNED_SQLSTATE
 |       RETURNING
+|       RETRY
 |       RETURNS
 |       REVERSE
 |       REWRITE
@@ -18181,6 +18490,10 @@ ACCOUNT
 |       INCONSISTENT 
 |       INDIVIDUAL
 |       HYBRID_SEARCH
+|       READ_CSV
+|       READ_JSON
+|       READ_PARQUET
+|       GLOB
 ;
 
 unreserved_keyword_special:

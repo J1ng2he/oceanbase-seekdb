@@ -111,6 +111,10 @@ public:
   virtual ~ObAlterTableExecutor();
   int execute(ObExecContext &ctx, ObAlterTableStmt &stmt);
 private:
+  // The retry of an AI column invalidates the value of the AI column of the
+  // rows that are selected by the predicate, the value is computed again by
+  // the worker of the AI columns.
+  int execute_retry_ai_column(ObExecContext &ctx, ObAlterTableStmt &stmt);
   static const int64_t TIME_INTERVAL_PER_PART_US = 50 * 1000; // 50ms
   static const int64_t MAX_WAIT_CHECK_SCHEMA_VERSION_INTERVAL_US = 120LL * 1000000LL; // 120s
   static const int64_t MIN_WAIT_CHECK_SCHEMA_VERSION_INTERVAL_US = 20LL * 1000000LL; // 20s

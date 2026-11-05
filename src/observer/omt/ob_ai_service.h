@@ -43,6 +43,11 @@ private:
   DISALLOW_COPY_AND_ASSIGN(ObAiServiceGuard);
 };
 
+// The worker that computes the value of the AI columns.  The worker reads the
+// tasks of `oceanbase.__all_ai_column_task`, calls the model of every AI column
+// of the row and writes the result back into the row.
+class ObAiColumnWorker;
+
 class ObAiService
 {
 public:
@@ -50,14 +55,15 @@ public:
   virtual ~ObAiService();
   static int server_module_init(ObAiService* &ai_service);
   int init();
-  int start() { return OB_SUCCESS; }
-  void stop() {};
-  void wait() {};
+  int start();
+  void stop();
+  void wait();
   void destroy();
 public:
   int get_ai_service_guard(ObAiServiceGuard &ai_service_guard);
 private:
   bool is_inited_;
+  ObAiColumnWorker *ai_column_worker_;
   DISALLOW_COPY_AND_ASSIGN(ObAiService);
 };
 

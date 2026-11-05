@@ -329,6 +329,10 @@ OB_INLINE int ObTableUpdateOp::update_row_to_das()
         //this row has been skipped, so can not write to DAS buffer(include its global index)
         //so need to break this loop
         break;
+      } else if (OB_FAIL(ObDMLService::capture_ai_update_row(static_cast<ObTableModifyOp *>(this), upd_ctdef, modify_row))) {
+        //the AI columns of the row have to be invalidated, the decision and the
+        //values of the row are read here, the expressions of the statement hold
+        //the values of the row only at this moment
       } else if (OB_FAIL(calc_tablet_loc(upd_ctdef, upd_rtdef, old_tablet_loc, new_tablet_loc))) {
       } else if (OB_FAIL(ObDMLService::update_row(upd_ctdef, upd_rtdef, old_tablet_loc, new_tablet_loc, dml_rtctx_,
                                                  modify_row.old_row_, modify_row.new_row_, modify_row.full_row_))) {

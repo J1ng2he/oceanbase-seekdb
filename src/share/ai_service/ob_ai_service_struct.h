@@ -20,6 +20,7 @@
 #include "lib/ob_define.h"
 #include "lib/string/ob_string.h"
 #include "common/json_type/ob_json_base.h"
+#include "lib/container/ob_se_array.h"
 #include "share/schema/ob_schema_struct.h"
 #include "share/ai_service/ob_ai_model_info.h"
 
@@ -98,6 +99,117 @@ private:
   ObString parameters_;
   ObString request_transform_fn_;
   ObString response_transform_fn_;
+};
+
+// The runtime metadata of one AI column.  It is parsed from the spec text
+// that the DDL resolver stored in the comment of the hidden spec column
+// (`__ai_p_<column>`).  The spec text is a flat `key=value` list, see
+// `ObDDLResolver::gen_ai_column_spec_text`.
+class ObAiColumnSpec
+{
+public:
+  ObAiColumnSpec() { reset(); }
+  ~ObAiColumnSpec() = default;
+
+  void reset()
+  {
+    valid_ = false;
+    func_name_.reset();
+    model_name_.reset();
+    prompt_expr_.reset();
+    normalized_expr_.reset();
+    max_retries_ = 0;
+    dim_ = -1;
+    deps_text_.reset();
+  }
+
+  // Parse the spec text.  The text is copied into the given allocator, so it
+  // stays valid after the schema cache entry is gone.
+  int parse(common::ObIAllocator &allocator, const ObString &spec_text);
+
+  bool is_valid() const { return valid_; }
+  const ObString &get_func_name() const { return func_name_; }
+  const ObString &get_model_name() const { return model_name_; }
+  const ObString &get_prompt_expr() const { return prompt_expr_; }
+  const ObString &get_normalized_expr() const { return normalized_expr_; }
+  int64_t get_max_retries() const { return max_retries_; }
+  int64_t get_dim() const { return dim_; }
+  // The raw `deps=` field, a comma separated list of the user columns that the
+  // prompt expression refers to.
+  const ObString &get_deps_text() const { return deps_text_; }
+  // Whether the prompt expression refers to the given column.
+  bool depends_on(const ObString &column_name) const;
+  bool is_embed() const { return 0 == func_name_.case_compare("AI_EMBED"); }
+
+  // The state of an AI column, it is stored in the hidden state column.
+  static const char *const STATE_PENDING;
+  static const char *const STATE_READY;
+  static const char *const STATE_FAILED;
+  // The state of a row whose AI column is going to be computed again.
+  static const char *const STATE_RETRY;
+
+  // The task states of `oceanbase.__all_ai_column_task`.
+  static const int64_t TASK_STATE_PENDING;
+  static const int64_t TASK_STATE_RUNNING;
+  static const int64_t TASK_STATE_RETRY;
+  static const int64_t TASK_STATE_FAILED;
+
+private:
+  bool valid_;
+  ObString func_name_;
+  ObString model_name_;
+  ObString prompt_expr_;
+  ObString normalized_expr_;
+  int64_t max_retries_;
+  int64_t dim_;
+  ObString deps_text_;
+};
+
+// Helpers that work on the AI columns of a table.
+class ObAiColumnUtil
+{
+public:
+  // Collect the AI columns of a table and their hidden companion columns.
+  // Every array is indexed the same way, so `ai_columns[i]` belongs to
+  // `state_columns[i]`, `request_columns[i]` and `spec_columns[i]`.
+  static int collect_ai_columns(const schema::ObTableSchema &table_schema,
+                                common::ObIArray<const schema::ObColumnSchemaV2 *> &ai_columns,
+                                common::ObIArray<const schema::ObColumnSchemaV2 *> &state_columns,
+                                common::ObIArray<const schema::ObColumnSchemaV2 *> &request_columns,
+                                common::ObIArray<const schema::ObColumnSchemaV2 *> &spec_columns);
+
+  // Build the row key predicate of a row, e.g. "`id` = 2".  The primary key
+  // columns are taken from the table schema, the values from the given
+  // `column_name` / `column_value` pairs.
+  static int build_rowkey_predicate(common::ObIAllocator &allocator,
+                                    const schema::ObTableSchema &table_schema,
+                                    const common::ObIArray<ObString> &column_names,
+                                    const common::ObIArray<ObString> &column_values,
+                                    ObString &predicate);
+
+  // Escape a string so that it can be embedded in a single quoted SQL literal.
+  static int escape_sql_string(common::ObIAllocator &allocator,
+                                const ObString &value,
+                                ObString &escaped);
+
+  // The name of the hidden companion column of an AI column.
+  static int hidden_column_name(common::ObIAllocator &allocator,
+                                 const ObString &ai_column_name,
+                                 const char *prefix,
+                                 ObString &hidden_name);
+
+  // The system message that tells the model the type of the value of an AI
+  // column.  It is empty when the type of the column needs no hint.
+  static const char *get_type_hint(const schema::ObColumnSchemaV2 &column);
+
+  // Rewrite the pseudo column `status` of a retry predicate into the hidden
+  // state column of the AI column that is retried.  The pseudo column is only
+  // the status of the AI column that is retried, a quoted name is always a
+  // physical column of the table.
+  static int rewrite_ai_status_pseudo_column(common::ObIAllocator &allocator,
+                                              const ObString &predicate,
+                                              const ObString &state_column_name,
+                                              ObString &rewritten);
 };
 
 } // namespace share

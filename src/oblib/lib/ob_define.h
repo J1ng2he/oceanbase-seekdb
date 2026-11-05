@@ -612,6 +612,12 @@ const char *const OB_VALUES = "__values";
 // hidden primary key name
 const char *const OB_HIDDEN_PK_INCREMENT_COLUMN_NAME = "__pk_increment"; //hidden
 const char *const OB_MOCK_LINK_TABLE_PK_COLUMN_NAME = "__link_table_pkey"; //hidden
+// AI column hidden companion columns: __ai_s_<col> / __ai_r_<col> / __ai_p_<col>
+const char *const OB_AI_STATE_COLUMN_NAME_PREFIX = "__ai_s_";
+const char *const OB_AI_REQUEST_COLUMN_NAME_PREFIX = "__ai_r_";
+const char *const OB_AI_SPEC_COLUMN_NAME_PREFIX = "__ai_p_";
+// the maximum length of the name of a hidden companion column
+const int64_t OB_AI_MAX_COLUMN_NAME_LENGTH = 128;
 // internal index prefix
 const char *const OB_INDEX_PREFIX = "__idx_";
 // internal user

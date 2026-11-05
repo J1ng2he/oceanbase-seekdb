@@ -2004,6 +2004,33 @@ int ObSqlParameterization::mark_tree(ParseNode *tree ,SqlInfo &sql_info)
         }
       }
     }
+  } else if (T_FILE_TABLE_FUNC == tree->type_) {
+    // The file table functions, e.g. read_csv, read_json, read_parquet and
+    // glob, read the schema of the file while the statement is resolved, the
+    // path and the options of the function are part of the plan.  The
+    // constants of the function must not be parameterized, otherwise the plan
+    // of one file would be reused for another file.  A question mark is a
+    // parameter of the statement, it must not be marked.
+    if (2 <= tree->num_child_ && OB_NOT_NULL(tree->children_[1])
+        && T_EXPR_LIST == tree->children_[1]->type_
+        && OB_NOT_NULL(tree->children_[1]->children_)) {
+      ParseNode *arg_list = tree->children_[1];
+      for (int64_t i = 0; i < arg_list->num_child_; ++i) {
+        ParseNode *arg = arg_list->children_[i];
+        if (OB_ISNULL(arg)) {
+          continue;
+        } else if (T_FILE_FUNC_NAMED_ARG == arg->type_) {
+          // the value of the option, the name of the option is not a constant
+          if (2 <= arg->num_child_ && OB_NOT_NULL(arg->children_[1])
+              && T_QUESTIONMARK != arg->children_[1]->type_) {
+            arg->children_[1]->is_tree_not_param_ = true;
+          }
+        } else if (T_QUESTIONMARK != arg->type_) {
+          // the path of the file
+          arg->is_tree_not_param_ = true;
+        }
+      }
+    }
   } else if (T_OP_LIKE == tree->type_) {
     if (3 == tree->num_child_) {   // child[0] like child[1] escape child[2]
       const int64_t ARGS_NUMBER_THREE = 3;

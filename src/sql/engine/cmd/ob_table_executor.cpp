@@ -42,6 +42,8 @@
 
 #include "sql/printer/ob_select_stmt_printer.h"
 #include "share/ob_structured_event_logger.h"
+#include "lib/string/ob_sql_string.h"
+#include "share/ai_service/ob_ai_service_struct.h"
 namespace oceanbase
 {
 using namespace common;
@@ -769,6 +771,12 @@ int ObAlterTableExecutor::execute(ObExecContext &ctx, ObAlterTableStmt &stmt)
           [&]{ return ctx.root_command_service().alter_trigger(stmt.get_tg_arg()); }),
           GCTX.self_addr());
     }
+  } else if (stmt.is_retry_ai_column()) {
+    // The retry of an AI column does not change the schema, it only
+    // invalidates the value of the AI column of the selected rows, so it is
+    // done here and not by the root service.
+    if (OB_FAIL(execute_retry_ai_column(ctx, stmt))) {
+    }
   } else {
     ObSQLSessionInfo *my_session = NULL;
     obcall::ObAlterTableRes res;
@@ -878,6 +886,65 @@ int ObAlterTableExecutor::execute(ObExecContext &ctx, ObAlterTableStmt &stmt)
       "table_info", table_info_buffer,
       "schema_version", res.schema_version_);
     SQL_ENG_LOG(INFO, "finish alter table execute.", K(ret), "ddl_event_info", ObDDLEventInfo(GCTX.self_addr()), K(first_stmt));
+  }
+  return ret;
+}
+
+int ObAlterTableExecutor::execute_retry_ai_column(ObExecContext &ctx, ObAlterTableStmt &stmt)
+{
+  int ret = OB_SUCCESS;
+  ObSQLSessionInfo *session = ctx.get_my_session();
+  ObSqlString sql;
+  sqlclient::ObISQLConnection *conn = NULL;
+  sqlclient::ObISQLConnectionGuard conn_guard;
+  const ObString &db_name = stmt.get_database_name();
+  const ObString &table_name = stmt.get_table_name();
+  const ObString &state_column_name = stmt.get_ai_retry_state_column_name();
+  const ObString &predicate = stmt.get_ai_retry_predicate();
+  if (OB_ISNULL(session)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_FAIL(sql.assign_fmt("update `%.*s`.`%.*s` set `%.*s` = '%s'",
+                                    static_cast<int>(db_name.length()), db_name.ptr(),
+                                    static_cast<int>(table_name.length()), table_name.ptr(),
+                                    static_cast<int>(state_column_name.length()), state_column_name.ptr(),
+                                    share::ObAiColumnSpec::STATE_RETRY))) {
+  } else if (predicate.length() > 0
+             && OB_FAIL(sql.append_fmt(" where %.*s",
+                                       static_cast<int>(predicate.length()), predicate.ptr()))) {
+  } else if (OB_FAIL(query::ObInnerSQLConnectionAccess::create_connection_with_external_session(
+               session, conn_guard))) {
+  } else if (OB_ISNULL(conn = conn_guard.get_ptr())) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    // The retry marker is written into the state column of the AI column, the
+    // state column is a hidden column, it is resolved only for an inner
+    // session.  The DML service reads the marker and invalidates the value of
+    // the AI column of the row, the task of the row is created in the same
+    // transaction.
+    //
+    // The statement runs on the session of the user, so it is a nested
+    // statement.  The flag of the DAS context tells the transaction control
+    // that the statement must not end the statement of the user, otherwise
+    // the transaction of the user would be broken.
+    ObDASCtx &das_ctx = ctx.get_das_ctx();
+    const bool saved_ai_nested = das_ctx.is_ai_column_nested_;
+    das_ctx.is_ai_column_nested_ = true;
+    const bool was_inner = session->is_inner();
+    const ObSQLSessionInfo::SessionType old_session_type = session->get_session_type();
+    if (!was_inner) {
+      session->set_inner_session();
+    }
+    int64_t affected_rows = 0;
+    const int exec_ret = conn->execute_write(sql.string(), affected_rows);
+    if (!was_inner) {
+      session->set_user_session();
+      session->set_session_type(old_session_type);
+    }
+    das_ctx.is_ai_column_nested_ = saved_ai_nested;
+    if (OB_SUCCESS != exec_ret) {
+      ret = exec_ret;
+      SQL_ENG_LOG(WARN, "failed to retry the AI column", K(exec_ret), K(affected_rows));
+    }
   }
   return ret;
 }

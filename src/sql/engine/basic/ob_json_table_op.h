@@ -28,6 +28,7 @@
 #include "sql/engine/expr/ob_expr.h"
 #include "sql/engine/expr/ob_json_param_type.h"
 #include "sql/engine/expr/ob_expr_json_utils.h"
+#include "sql/engine/basic/ob_file_table_source.h"
 
 namespace oceanbase
 {
@@ -49,6 +50,7 @@ enum table_type : int8_t {
   OB_JSON_TABLE = 1,
   OB_XML_TABLE = 2,
   OB_UNNEST_TABLE = 3,
+  OB_FILE_TABLE = 4,
 };
 
 typedef enum JtNodeType {
@@ -163,6 +165,10 @@ struct JtScanCtx {
     return spec_ptr_->table_type_ == OB_UNNEST_TABLE_TYPE;
   }
 
+  bool is_file_table_func() {
+    return spec_ptr_->table_type_ == OB_FILE_TABLE_TYPE;
+  }
+
   ObJsonTableSpec* spec_ptr_;
   ObEvalCtx* eval_ctx_;
   ObExecContext* exec_ctx_;
@@ -267,6 +273,9 @@ public:
   virtual int cast_to_result(ObRegCol& col_node, JtScanCtx* ctx, bool enable_error = false, bool is_pack_result = true) { return 0; }
   virtual int set_expr_exec_param(ObRegCol& col_node, JtScanCtx* ctx) { return 0; }
   virtual int reset_ctx(ObRegCol &scan_node, JtScanCtx*& ctx) { return 0; } // init variable before seek value
+  // releases the resources that the table function holds, it is called when
+  // the operator closes
+  virtual void destroy() {}
 };
 
 class JsonTableFunc : public MulModeTableFunc {
@@ -312,6 +321,40 @@ public:
   int reset_path_iter(ObRegCol &scan_node, void* in, JtScanCtx*& ctx, ScanType init_flag, bool &is_null_value);
   int get_iter_value(ObRegCol &col_node, JtScanCtx* ctx, bool &is_null_value);
   int reset_ctx(ObRegCol &scan_node, JtScanCtx*& ctx);
+};
+
+/**
+ * The table function that reads a local file, e.g. read_csv or read_json.
+ *
+ * The name of the table function and the path of the file are carried by the
+ * root column of the table, the other columns of the table describe the
+ * columns of the file.
+ */
+class FileTableFunc : public MulModeTableFunc {
+public:
+  FileTableFunc()
+  : MulModeTableFunc(),
+    reader_(NULL),
+    func_type_(OB_FILE_FUNC_READ_CSV),
+    column_names_(common::ObArray<ObString>()),
+    path_() {}
+  ~FileTableFunc() {}
+
+  int init_ctx(ObRegCol &scan_node, JtScanCtx*& ctx);
+  int eval_input(ObJsonTableOp &jt, JtScanCtx& ctx, ObEvalCtx &eval_ctx);
+  int reset_path_iter(ObRegCol &scan_node, void* in, JtScanCtx*& ctx, ScanType init_flag, bool &is_null_value);
+  int get_iter_value(ObRegCol &col_node, JtScanCtx* ctx, bool &is_null_value);
+  int reset_ctx(ObRegCol &scan_node, JtScanCtx*& ctx);
+  // the reader that holds the current row of the file
+  ObFileTableReader *get_reader() { return reader_; }
+  // closes the file that the reader holds
+  void destroy();
+
+private:
+  ObFileTableReader *reader_;
+  ObFileTableFuncType func_type_;
+  common::ObArray<ObString> column_names_;
+  ObString path_;
 };
 
 class ObMultiModeTableNode {
@@ -495,6 +538,8 @@ public:
   static int eval_value_col(ObRegCol &col_node, JtScanCtx* ctx, ObExpr* col_expr, bool& is_null);
   static int eval_exist_col(ObRegCol &col_node, JtScanCtx* ctx, ObExpr* col_expr, bool& is_null);
   static int eval_unnest_col(ObRegCol &col_node, void* in, JtScanCtx* ctx, ObExpr* col_expr);
+  // reads the value of one column of the current row of a file
+  static int eval_file_col(ObRegCol &col_node, void* in, JtScanCtx* ctx, ObExpr* col_expr, bool& is_null);
   static void proc_query_on_error(JtScanCtx* ctx, ObRegCol &col_node, int& ret, bool& is_null);
   static int check_default_val_cast_allowed(JtScanCtx* ctx, ObMultiModeTableNode &col_node, ObExpr* expr)  { return 0; }  // check type of default value
   static int set_val_on_empty(JtScanCtx* ctx, ObRegCol &col_node, bool& need_cast_res, bool& is_null);

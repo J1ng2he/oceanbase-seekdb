@@ -102,6 +102,7 @@ public:
     : ObOperator(exec_ctx, spec, input),
       top_limit_cnt_(INT64_MAX),
       is_first_(true),
+      header_written_(false),
       field_str_(),
       line_str_(),
       cs_type_(CS_TYPE_INVALID),
@@ -262,10 +263,15 @@ private:
   int64_t get_shared_buf_len() { return shared_buf_len_; }
 
   bool file_need_split(int64_t file_size);
+  // writes the row that holds the names of the columns, it is written before
+  // the first row of the statement
+  int write_header(ObExternalFileWriter *data_writer);
 
 private:
   int64_t top_limit_cnt_;
   bool is_first_;
+  // whether the row that holds the names of the columns has been written
+  bool header_written_;
   ObObj field_str_;
   ObObj line_str_;
   ObObj file_name_;

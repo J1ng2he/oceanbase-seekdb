@@ -104,6 +104,18 @@ public:
     alter_table_arg_.lock_session_create_ts_ = create_ts;
   }
   void set_lock_priority();
+
+  // The statement retries the value of an AI column.  The retry is not a
+  // change of the schema, it only invalidates the AI column of the rows that
+  // are selected by the predicate, so that the value is computed again.
+  bool is_retry_ai_column() const { return is_retry_ai_column_; }
+  void set_is_retry_ai_column(const bool flag) { is_retry_ai_column_ = flag; }
+  const common::ObString &get_ai_retry_column_name() const { return ai_retry_column_name_; }
+  void set_ai_retry_column_name(const common::ObString &name) { ai_retry_column_name_ = name; }
+  const common::ObString &get_ai_retry_state_column_name() const { return ai_retry_state_column_name_; }
+  void set_ai_retry_state_column_name(const common::ObString &name) { ai_retry_state_column_name_ = name; }
+  const common::ObString &get_ai_retry_predicate() const { return ai_retry_predicate_; }
+  void set_ai_retry_predicate(const common::ObString &text) { ai_retry_predicate_ = text; }
 private:
   obcall::ObAlterTableArg alter_table_arg_;
   bool is_comment_table_;
@@ -114,6 +126,10 @@ private:
   obcall::ObAlterTriggerArg tg_arg_;
   uint64_t alter_table_action_count_;
   obcall::ObExchangePartitionArg exchange_partition_arg_;
+  bool is_retry_ai_column_;
+  common::ObString ai_retry_column_name_;
+  common::ObString ai_retry_state_column_name_;
+  common::ObString ai_retry_predicate_;
 };
 
 inline int ObAlterTableStmt::set_tz_info_wrap(const common::ObTimeZoneInfoWrap &tz_info_wrap)

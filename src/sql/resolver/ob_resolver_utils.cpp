@@ -1845,6 +1845,17 @@ stmt::StmtType ObResolverUtils::get_stmt_type_by_item_type(const ObItemType item
         type = stmt::T_ALTER_USER_ROLE;
       }
       break;
+      case T_DESCRIBE_STMT: {
+        // a describe statement is resolved into a select statement
+        type = stmt::T_SELECT;
+      }
+      break;
+      case T_COPY_STMT: {
+        // a copy statement is resolved into a select statement that writes its
+        // rows into a file
+        type = stmt::T_SELECT;
+      }
+      break;
       case T_SP_CALL_STMT: {
         type = stmt::T_CALL_PROCEDURE;
       }

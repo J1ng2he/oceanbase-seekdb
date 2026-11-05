@@ -577,6 +577,15 @@ protected:
   bool check_generated_column_has_json_constraint(const ObSelectStmt *stmt,
                                                   const ObColumnRefRawExpr *col_expr);
 
+  // resolves a file table function, e.g. read_csv, read_json, read_parquet
+  // or glob
+  int resolve_file_table_item(const ParseNode &parse_tree, TableItem *&tbl_item);
+
+  // the statement describes a file table function instead of querying it, the
+  // description of the columns of the file is returned
+  void set_describe_file_table(bool describe_file_table) { is_describe_file_table_ = describe_file_table; }
+  bool is_describe_file_table() const { return is_describe_file_table_; }
+
   int resolve_json_table_check_dup_name(const ObJsonTableDef* table_def,
                                             const ObString& column_name,
                                             bool& exists);
@@ -883,6 +892,9 @@ protected:
   ObSharedExprResolver expr_resv_ctx_;
   /*these member is only for with clause*/
   ObCteResolverCtx cte_ctx_;
+
+  //the statement describes a file table function instead of querying it
+  bool is_describe_file_table_;
 
   //store json table column info
   common::ObSEArray<ObDmlJtColDef *, 1, common::ModulePageAllocator, true> json_table_infos_;

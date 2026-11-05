@@ -47,6 +47,30 @@ namespace sql
     }
   };
 
+  /**
+   * The resolver of a DESCRIBE statement.
+   *
+   * A DESCRIBE statement that reads a file lists the columns of the file, the
+   * table of the statement holds one row per column of the file.  A DESCRIBE
+   * statement that does not read a file shows the plan of the statement, it is
+   * the behaviour of MySQL.
+   */
+  class ObDescribeResolver : public ObSelectResolver
+  {
+  public:
+    explicit ObDescribeResolver(ObResolverParams &params)
+      : ObSelectResolver(params)
+    {}
+    virtual ~ObDescribeResolver() {}
+    virtual int resolve(const ParseNode &parse_tree);
+
+  private:
+    // whether the statement reads a file
+    static bool has_file_table_func(const ParseNode &node);
+    // shows the plan of the statement
+    int resolve_as_explain(const ParseNode &child_node);
+  };
+
 }
 }
 #endif
