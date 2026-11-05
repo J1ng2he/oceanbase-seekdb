@@ -17912,7 +17912,6 @@ ACCOUNT
 |       CONSTRAINT_SCHEMA
 |       CONTAINS
 |       CONTRIBUTORS
-|       COPY
 |       COUNT
 |       COSINE
 |       CPU
@@ -18269,7 +18268,6 @@ ACCOUNT
 |       RESUME
 |       RETURNED_SQLSTATE
 |       RETURNING
-|       RETRY
 |       RETURNS
 |       REVERSE
 |       REWRITE
@@ -18490,10 +18488,17 @@ ACCOUNT
 |       INCONSISTENT 
 |       INDIVIDUAL
 |       HYBRID_SEARCH
-|       READ_CSV
-|       READ_JSON
-|       READ_PARQUET
-|       GLOB
+/*
+ * COPY, RETRY, READ_CSV, READ_JSON, READ_PARQUET and GLOB introduce a
+ * statement or a table function and are therefore not listed here.  A
+ * non-reserved keyword may be followed by '(' (a function call, or the
+ * column list of CREATE TABLE), so a keyword that also starts such a
+ * construct makes the parser choose between reducing the keyword to an
+ * identifier and shifting the '(' of the construct.  The conflict is
+ * harmless for the canonical LR(1) tables of a recent bison but the
+ * LALR(1) tables of the bison 2.4.1 that the build of this repository
+ * requires report it, and the build fails on it.
+ */
 ;
 
 unreserved_keyword_special:
